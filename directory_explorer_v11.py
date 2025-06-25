@@ -3,6 +3,9 @@
 # multi_column = true
 # ///
 
+# directory_explorer_v11.py - Enhanced with deployment path support
+# v11: Added support for Railway/cloud deployment with simplified paths
+
 import marimo
 
 __generated_with = "0.14.6"
@@ -53,8 +56,25 @@ def _(mo):
 
 @app.cell(hide_code=True)
 def _(os):
+    # v11: Simple deployment detection
+    def is_deployment_environment():
+        """Check if running in deployment environment (Railway, etc.)"""
+        # Check for common deployment indicators
+        return any([
+            os.environ.get('RAILWAY_ENVIRONMENT'),
+            os.environ.get('PORT'),  # Common in cloud deployments
+            os.path.exists('./Procfile'),  # Deployment indicator
+            # Check if we're NOT in a typical Windows/WSL environment
+            (not os.path.exists('C:\\') and not os.path.exists('/mnt/c/'))
+        ])
+    
     # Machine Environment Configuration
     MACHINE_ENVIRONMENTS = {
+        "DEPLOYMENT": {
+            "label": "Railway/Cloud Deployment",
+            "start_path": os.path.abspath('.'),  # Current directory in deployment
+            "description": "Cloud deployment environment"
+        },
         "WFH": {
             "label": "Work From Home",
             "start_path": r"C:\Users\Michael\Dropbox (Personal)",
@@ -84,8 +104,12 @@ def _(os):
 
     def detect_current_environment() -> str:
         """Auto-detect current machine environment based on existing paths"""
+        # v11: Check deployment environment first
+        if is_deployment_environment():
+            return "DEPLOYMENT"
+            
         for env_key, env_config in MACHINE_ENVIRONMENTS.items():
-            if env_key == "OTHER":
+            if env_key in ["OTHER", "DEPLOYMENT"]:
                 continue
             if env_config["start_path"] and os.path.exists(env_config["start_path"]):
                 return env_key
@@ -120,6 +144,7 @@ def _(os):
     return (
         MACHINE_ENVIRONMENTS,
         detect_current_environment,
+        is_deployment_environment,
         resolve_environment_paths,
     )
 
@@ -860,7 +885,7 @@ def _(mo):
 
 
 @app.cell(hide_code=True)
-def _(Any, Dict, List, os, resolved_start_path):
+def _(Any, Dict, List, is_deployment_environment, os, resolved_start_path):
     # Column E: Dynamic Wafer Directory Navigation and File Discovery (v10)
     def discover_tm_scope_files_dynamic(base_path: str) -> Dict[str, Dict[str, Dict[str, List[str]]]]:
         """
@@ -871,11 +896,16 @@ def _(Any, Dict, List, os, resolved_start_path):
         if not base_path or not os.path.exists(base_path):
             return {}
 
-        # Construct tm_scope_data path
-        tm_scope_path = os.path.join(base_path, 
-            "USDCT1_PA", "Parent_Dir", "Data_to_organize", 
-            "Lab_Instrument_Doc", "TC2_software", "sps_gui", 
-            "src", "sps_gui", "utils", "notebooks", "tm_scope_data")
+        # v11: Construct tm_scope_data path based on environment
+        if is_deployment_environment():
+            # Simple path for deployment
+            tm_scope_path = os.path.join(base_path, "data", "tm_scope_data")
+        else:
+            # Original nested path for local development
+            tm_scope_path = os.path.join(base_path, 
+                "USDCT1_PA", "Parent_Dir", "Data_to_organize", 
+                "Lab_Instrument_Doc", "TC2_software", "sps_gui", 
+                "src", "sps_gui", "utils", "notebooks", "tm_scope_data")
 
         if not os.path.exists(tm_scope_path):
             print(f"❌ tm_scope_data directory not found: {tm_scope_path}")
@@ -1011,11 +1041,14 @@ def _(Any, Dict, List, os, resolved_start_path):
     tm_scope_files_discovered_v10 = discover_tm_scope_files_dynamic(resolved_start_path)
     tm_file_validation_results_v10 = validate_file_structure_with_wafers(tm_scope_files_discovered_v10)
 
-    # Construct base path for tm_scope data (now includes wafer directories)
-    tm_scope_base_path_v10 = os.path.join(resolved_start_path, 
-        "USDCT1_PA", "Parent_Dir", "Data_to_organize", 
-        "Lab_Instrument_Doc", "TC2_software", "sps_gui", 
-        "src", "sps_gui", "utils", "notebooks", "tm_scope_data") if resolved_start_path else ""
+    # v11: Construct base path for tm_scope data based on environment
+    if is_deployment_environment():
+        tm_scope_base_path_v10 = os.path.join(resolved_start_path, "data", "tm_scope_data") if resolved_start_path else ""
+    else:
+        tm_scope_base_path_v10 = os.path.join(resolved_start_path, 
+            "USDCT1_PA", "Parent_Dir", "Data_to_organize", 
+            "Lab_Instrument_Doc", "TC2_software", "sps_gui", 
+            "src", "sps_gui", "utils", "notebooks", "tm_scope_data") if resolved_start_path else ""
 
     # Display discovery results with wafer breakdown
     if tm_scope_files_discovered_v10:
@@ -1235,7 +1268,7 @@ def _(Any, Dict, List, Optional, dataclass, pd):
 
 
 @app.cell(hide_code=True)
-def _(Any, Dict, TMScopeDataCollection, os, pd):
+def _(Any, Dict, TMScopeDataCollection, is_deployment_environment, os, pd):
     # Enhanced Excel parsing functions for TMScopeDataCollection with wafer hierarchy (v10)
     def parse_excel_to_hierarchical_structure_v10(file_path: str) -> Dict[str, Any]:
         """
@@ -1436,7 +1469,12 @@ def _(Any, Dict, TMScopeDataCollection, os, pd):
 
                     # Process first file from each condition
                     if file_list:
-                        file_path = os.path.join(base_path, wafer_dir, vout_dir, cboot_dir, file_list[0])
+                        # v11: Construct file path based on environment
+                        if is_deployment_environment():
+                            file_path = os.path.join(base_path, "data", "tm_scope_data", 
+                                                   wafer_dir, vout_dir, cboot_dir, file_list[0])
+                        else:
+                            file_path = os.path.join(base_path, wafer_dir, vout_dir, cboot_dir, file_list[0])
 
                         # Only process files that are not in skip directories
                         if '.ALL' in file_path:
