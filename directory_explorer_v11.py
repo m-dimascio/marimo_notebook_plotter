@@ -1487,12 +1487,8 @@ def _(Any, Dict, TMScopeDataCollection, is_deployment_environment, os, pd):
 
                     # Process first file from each condition
                     if file_list:
-                        # v11: Construct file path based on environment
-                        if is_deployment_environment():
-                            file_path = os.path.join(base_path, "tm_scope_data", 
-                                                   wafer_dir, vout_dir, cboot_dir, file_list[0])
-                        else:
-                            file_path = os.path.join(base_path, wafer_dir, vout_dir, cboot_dir, file_list[0])
+                        # Construct file path - base_path already includes tm_scope_data
+                        file_path = os.path.join(base_path, wafer_dir, vout_dir, cboot_dir, file_list[0])
 
                         # Only process files that are not in skip directories
                         if '.ALL' in file_path:
