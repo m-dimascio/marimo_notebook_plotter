@@ -1,1 +1,0 @@
-web: marimo run directory_explorer_v11.py --host 0.0.0.0 --port $PORT --headless --mode app
