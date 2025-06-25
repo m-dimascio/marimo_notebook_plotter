@@ -116,7 +116,13 @@ def _(os):
         return "OTHER"
 
     def resolve_environment_paths(selected_env: str, custom_path: str = "") -> tuple:
-        """Resolve start paths based on environment selection"""
+        """Resolve start paths based on environment selection with deployment support"""
+        
+        # v11: Handle deployment environment with simplified paths
+        if selected_env == "DEPLOYMENT":
+            start_path = os.path.abspath('.')
+            # In deployment, return current directory for all paths
+            return start_path, start_path, start_path
 
         if selected_env == "OTHER":
             if not custom_path:
@@ -126,7 +132,7 @@ def _(os):
             env_config = MACHINE_ENVIRONMENTS[selected_env]
             start_path = env_config["start_path"]
 
-        # Validate path exists
+        # Validate path exists (skip for deployment)
         if not os.path.exists(start_path):
             raise FileNotFoundError(f"Path does not exist: {start_path}")
 
@@ -321,19 +327,23 @@ def _(List, Optional, os):
 
 
 @app.cell(hide_code=True)
-def _(global_sequencer_path, global_sps_gui_path, os):
+def _(global_sequencer_path, global_sps_gui_path, is_deployment_environment, os):
     # Define the package directory global_package_paths
     global_package_paths = {
         "sequencer": global_sequencer_path,
         "sps_gui": global_sps_gui_path
     }
 
-    # Check if global_package_paths exist
+    # Check if global_package_paths exist (v11: deployment-aware)
     for name, path in global_package_paths.items():
         if path and os.path.exists(path):
             print(f"✅ {name}: {path}")
         else:
-            print(f"❌ {name}: {path} (not found or invalid)")
+            # v11: In deployment, don't show errors for missing sequencer/sps_gui paths
+            if is_deployment_environment() and name in ["sequencer", "sps_gui"]:
+                print(f"⚠️ {name}: {path} (not available in deployment mode)")
+            else:
+                print(f"❌ {name}: {path} (not found or invalid)")
 
     return (global_package_paths,)
 
@@ -353,6 +363,7 @@ def _(mo):
 @app.cell(hide_code=True)
 def _(
     global_package_paths,
+    is_deployment_environment,
     mo,
     os,
     package_selector,
@@ -371,7 +382,12 @@ def _(
             pkg_path = global_package_paths[pkg_name]
 
             if not pkg_path or not os.path.exists(pkg_path):
-                return [f"❌ Directory not found: {pkg_path}"]
+                # v11: In deployment, provide helpful message for missing packages
+                if is_deployment_environment() and pkg_name in ["sequencer", "sps_gui"]:
+                    return [f"⚠️ Package '{pkg_name}' not available in deployment mode", 
+                           "   Deployment focuses on tm_scope data analysis only."]
+                else:
+                    return [f"❌ Directory not found: {pkg_path}"]
 
             lines = [f"## {pkg_name.upper()} Directory Structure"]
             lines.append(f"**Path:** `{pkg_path}`")
@@ -636,7 +652,8 @@ def _(load_button, pd, pickle, pickle_files, pickle_selector):
         return result
 
     # Load selected pickle file when button is clicked (value changes)
-    if (load_button.value > 0 and 
+    # v11: Fix deployment TypeError - handle None button values
+    if (load_button.value is not None and load_button.value > 0 and 
         hasattr(pickle_selector, 'value') and 
         pickle_selector.value and 
         pickle_selector.value != "No files"):
