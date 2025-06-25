@@ -63,7 +63,8 @@ def _(os):
         return any([
             os.environ.get('RAILWAY_ENVIRONMENT'),
             os.environ.get('PORT'),  # Common in cloud deployments
-            os.path.exists('./Procfile'),  # Deployment indicator
+            os.path.exists('./railway.json'),  # Railway deployment config
+            os.path.exists('./Procfile'),  # Other deployment platforms
             # Check if we're NOT in a typical Windows/WSL environment
             (not os.path.exists('C:\\') and not os.path.exists('/mnt/c/'))
         ])
@@ -915,8 +916,8 @@ def _(Any, Dict, List, is_deployment_environment, os, resolved_start_path):
 
         # v11: Construct tm_scope_data path based on environment
         if is_deployment_environment():
-            # Simple path for deployment
-            tm_scope_path = os.path.join(base_path, "data", "tm_scope_data")
+            # Simple path for deployment - tm_scope_data is in root
+            tm_scope_path = os.path.join(base_path, "tm_scope_data")
         else:
             # Original nested path for local development
             tm_scope_path = os.path.join(base_path, 
@@ -1060,7 +1061,7 @@ def _(Any, Dict, List, is_deployment_environment, os, resolved_start_path):
 
     # v11: Construct base path for tm_scope data based on environment
     if is_deployment_environment():
-        tm_scope_base_path_v10 = os.path.join(resolved_start_path, "data", "tm_scope_data") if resolved_start_path else ""
+        tm_scope_base_path_v10 = os.path.join(resolved_start_path, "tm_scope_data") if resolved_start_path else ""
     else:
         tm_scope_base_path_v10 = os.path.join(resolved_start_path, 
             "USDCT1_PA", "Parent_Dir", "Data_to_organize", 
@@ -1488,7 +1489,7 @@ def _(Any, Dict, TMScopeDataCollection, is_deployment_environment, os, pd):
                     if file_list:
                         # v11: Construct file path based on environment
                         if is_deployment_environment():
-                            file_path = os.path.join(base_path, "data", "tm_scope_data", 
+                            file_path = os.path.join(base_path, "tm_scope_data", 
                                                    wafer_dir, vout_dir, cboot_dir, file_list[0])
                         else:
                             file_path = os.path.join(base_path, wafer_dir, vout_dir, cboot_dir, file_list[0])
