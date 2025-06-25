@@ -11,7 +11,7 @@ import marimo
 __generated_with = "0.14.6"
 app = marimo.App(
     width="columns",
-    layout_file="layouts/directory_explorer_v10.grid.json",
+    layout_file="layouts/directory_explorer_v11.grid.json",
 )
 
 
@@ -67,7 +67,7 @@ def _(os):
             # Check if we're NOT in a typical Windows/WSL environment
             (not os.path.exists('C:\\') and not os.path.exists('/mnt/c/'))
         ])
-    
+
     # Machine Environment Configuration
     MACHINE_ENVIRONMENTS = {
         "DEPLOYMENT": {
@@ -107,7 +107,7 @@ def _(os):
         # v11: Check deployment environment first
         if is_deployment_environment():
             return "DEPLOYMENT"
-            
+
         for env_key, env_config in MACHINE_ENVIRONMENTS.items():
             if env_key in ["OTHER", "DEPLOYMENT"]:
                 continue
@@ -1805,12 +1805,12 @@ def _(
         """Break load checkboxes into multiple rows"""
         if len(load_checkboxes) <= max_per_row:
             return mo.hstack(load_checkboxes, gap=1)
-    
+
         rows = []
         for i in range(0, len(load_checkboxes), max_per_row):
             row_checkboxes = load_checkboxes[i:i + max_per_row]
             rows.append(mo.hstack(row_checkboxes, gap=1))
-    
+
         return mo.vstack(rows, gap=1)
 
     # Create enhanced organized checkbox panel layout with wafer row
