@@ -24,6 +24,7 @@ def _():
 
     import pickle
     import gzip
+    import hashlib
     import pandas as pd
     import polars as pl
     from pathlib import Path
@@ -42,6 +43,7 @@ def _():
         dataclass,
         go,
         gzip,
+        hashlib,
         mo,
         os,
         pc,
@@ -1565,6 +1567,8 @@ def _(
     TMScopeDataCollection,
     build_tmscope_collection_v10,
     gzip,
+    hashlib,
+    is_deployment_environment,
     pickle,
     tm_scope_base_path_v10,
     tm_scope_files_discovered_v10,
@@ -1588,10 +1592,9 @@ def _(
             print(f"❌ Cache directory creation failed: {e}")
             return None
 
-    def get_file_cache_key(file_path):
-        """Generate cache key from file path"""
-        import hashlib
-        return hashlib.md5(file_path.encode()).hexdigest()
+    def get_file_cache_key(filename):
+        """Generate cache key from filename only (deployment-friendly)"""
+        return hashlib.md5(filename.encode()).hexdigest()
 
     def load_file_cache(base_path):
         """Load existing compressed file cache or create empty one"""
@@ -1629,24 +1632,19 @@ def _(
         except Exception as e:
             print(f"⚠️ Cache save failed: {e}")
 
-    def is_file_cached_and_valid(file_path, cache):
-        """Check if file is cached and cache is still valid"""
+    def is_file_cached(filename, cache):
+        """Check if file is cached (deployment-friendly filename check)"""
         try:
-            if not os.path.exists(file_path):
-                return False
-            cache_key = get_file_cache_key(file_path)
-            if cache_key not in cache:
-                return False
-            cached_item = cache[cache_key]
-            # Check if file modification time matches cache
-            current_mtime = os.path.getmtime(file_path)
-            return cached_item.get("file_mtime") == current_mtime
+            cache_key = get_file_cache_key(filename)
+            return cache_key in cache and cache[cache_key].get("filename") == filename
         except:
             return False
 
     def build_tmscope_collection_with_cache(discovered_files, base_path):
-        """Build TMScopeDataCollection using file-level cache"""
-        print("🔄 Building Enhanced TMScopeDataCollection with file-level caching...")
+        """Build TMScopeDataCollection using deployment-aware file-level cache"""
+        is_deployment = is_deployment_environment()
+        cache_mode = "deployment (read-only)" if is_deployment else "local (read-write)"
+        print(f"🔄 Building Enhanced TMScopeDataCollection with file-level caching ({cache_mode})...")
         
         # Load existing cache
         file_cache = load_file_cache(base_path)
@@ -1684,10 +1682,10 @@ def _(
                         if '.ALL' in file_path:
                             continue
                         
-                        cache_key = get_file_cache_key(file_path)
+                        cache_key = get_file_cache_key(filename)
                         
-                        # Check cache first
-                        if is_file_cached_and_valid(file_path, file_cache):
+                        # Check cache first (filename-based)
+                        if is_file_cached(filename, file_cache):
                             # Use cached data
                             cached_data = file_cache[cache_key]["parsed_data"]
                             extraction_metadata["cache_hits"] += 1
@@ -1699,16 +1697,18 @@ def _(
                             cached_data = parse_excel_to_hierarchical_structure_v10(file_path)
                             extraction_metadata["cache_misses"] += 1
                             
-                            # Cache the result
-                            try:
-                                file_cache[cache_key] = {
-                                    "file_path": file_path,
-                                    "file_mtime": os.path.getmtime(file_path),
-                                    "parsed_data": cached_data,
-                                    "filename": filename
-                                }
-                            except:
-                                pass  # Continue even if caching fails
+                            # Cache the result (only in non-deployment mode)
+                            if not is_deployment:
+                                try:
+                                    file_cache[cache_key] = {
+                                        "file_path": file_path,
+                                        "parsed_data": cached_data,
+                                        "filename": filename
+                                    }
+                                except:
+                                    pass  # Continue even if caching fails
+                            else:
+                                print(f"   ⚠️ Deployment mode: parsed but not cached")
                         
                         # Add to collection if parsing succeeded
                         if cached_data is not None:
@@ -1750,12 +1750,15 @@ def _(
                         else:
                             extraction_metadata["files_failed"] += 1
         
-        # Save updated cache
+        # Save updated cache (only in non-deployment mode)
         final_cache_size = len(file_cache)
-        if final_cache_size > initial_cache_size:
+        if not is_deployment and final_cache_size > initial_cache_size:
             save_file_cache(file_cache, base_path)
         else:
-            print("📋 Cache unchanged, no save needed")
+            if is_deployment:
+                print("📋 Deployment mode: cache read-only, no save performed")
+            else:
+                print("📋 Cache unchanged, no save needed")
         
         # Convert sets to lists for JSON serialization
         extraction_metadata["wafers_found"] = list(extraction_metadata["wafers_found"])
