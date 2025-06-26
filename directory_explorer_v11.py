@@ -23,6 +23,7 @@ def _():
     from dataclasses import dataclass
 
     import pickle
+    import gzip
     import pandas as pd
     import polars as pl
     from pathlib import Path
@@ -40,6 +41,7 @@ def _():
         Optional,
         dataclass,
         go,
+        gzip,
         mo,
         os,
         pc,
@@ -1562,14 +1564,221 @@ def _(Any, Dict, TMScopeDataCollection, is_deployment_environment, os, pd):
 def _(
     TMScopeDataCollection,
     build_tmscope_collection_v10,
+    gzip,
+    pickle,
     tm_scope_base_path_v10,
     tm_scope_files_discovered_v10,
 ):
+    # Simple file-level incremental cache for TMScopeDataCollection
+    def get_cache_directory(base_path):
+        """Get cache directory inside tm_scope_data directory"""
+        try:
+            # Place cache inside tm_scope_data directory
+            cache_dir = os.path.join(base_path, ".tm_scope_cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            # Test write access
+            test_file = os.path.join(cache_dir, "test_write.tmp")
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
+            print(f"💾 Cache directory: {cache_dir}")
+            return cache_dir
+        except Exception as e:
+            print(f"❌ Cache directory creation failed: {e}")
+            return None
+
+    def get_file_cache_key(file_path):
+        """Generate cache key from file path"""
+        import hashlib
+        return hashlib.md5(file_path.encode()).hexdigest()
+
+    def load_file_cache(base_path):
+        """Load existing compressed file cache or create empty one"""
+        cache_dir = get_cache_directory(base_path)
+        if cache_dir is None:
+            return {}
+            
+        cache_file = os.path.join(cache_dir, "file_cache.pkl.gz")
+        try:
+            if os.path.exists(cache_file):
+                with gzip.open(cache_file, 'rb') as f:
+                    cached_data = pickle.load(f)
+                compressed_size = os.path.getsize(cache_file) / (1024 * 1024)  # MB
+                print(f"📋 Loaded compressed cache with {len(cached_data)} entries ({compressed_size:.1f}MB)")
+                return cached_data
+        except Exception as e:
+            print(f"⚠️ Cache load failed: {e}")
+        
+        print("📋 Starting with empty cache")
+        return {}
+
+    def save_file_cache(cache, base_path):
+        """Save compressed file cache"""
+        cache_dir = get_cache_directory(base_path)
+        if cache_dir is None:
+            print("⚠️ No cache directory available, skipping cache save")
+            return
+            
+        cache_file = os.path.join(cache_dir, "file_cache.pkl.gz")
+        try:
+            with gzip.open(cache_file, 'wb') as f:
+                pickle.dump(cache, f)
+            compressed_size = os.path.getsize(cache_file) / (1024 * 1024)  # MB
+            print(f"💾 Saved compressed cache with {len(cache)} entries ({compressed_size:.1f}MB): {cache_file}")
+        except Exception as e:
+            print(f"⚠️ Cache save failed: {e}")
+
+    def is_file_cached_and_valid(file_path, cache):
+        """Check if file is cached and cache is still valid"""
+        try:
+            if not os.path.exists(file_path):
+                return False
+            cache_key = get_file_cache_key(file_path)
+            if cache_key not in cache:
+                return False
+            cached_item = cache[cache_key]
+            # Check if file modification time matches cache
+            current_mtime = os.path.getmtime(file_path)
+            return cached_item.get("file_mtime") == current_mtime
+        except:
+            return False
+
+    def build_tmscope_collection_with_cache(discovered_files, base_path):
+        """Build TMScopeDataCollection using file-level cache"""
+        print("🔄 Building Enhanced TMScopeDataCollection with file-level caching...")
+        
+        # Load existing cache
+        file_cache = load_file_cache(base_path)
+        initial_cache_size = len(file_cache)
+        
+        # Initialize collection structures
+        collection_data = {}
+        collection_time_base = {}
+        collection_metadata = {}
+        extraction_metadata = {
+            "files_processed": 0,
+            "files_failed": 0,
+            "wafers_found": set(),
+            "conditions_found": set(),
+            "cache_hits": 0,
+            "cache_misses": 0
+        }
+        
+        # Process each file
+        total_files = sum(len(file_list) for wafer_data in discovered_files.values() 
+                         for cboot_dict in wafer_data.values() 
+                         for file_list in cboot_dict.values())
+        
+        current_file = 0
+        for wafer_dir, wafer_data in discovered_files.items():
+            for vout_dir, cboot_dict in wafer_data.items():
+                for cboot_dir, file_list in cboot_dict.items():
+                    if cboot_dir == "direct":
+                        continue
+                    
+                    for filename in file_list:
+                        current_file += 1
+                        file_path = os.path.join(base_path, wafer_dir, vout_dir, cboot_dir, filename)
+                        
+                        if '.ALL' in file_path:
+                            continue
+                        
+                        cache_key = get_file_cache_key(file_path)
+                        
+                        # Check cache first
+                        if is_file_cached_and_valid(file_path, file_cache):
+                            # Use cached data
+                            cached_data = file_cache[cache_key]["parsed_data"]
+                            extraction_metadata["cache_hits"] += 1
+                            if current_file % 10 == 0:
+                                print(f"📋 Cache hit {current_file}/{total_files}: {filename}")
+                        else:
+                            # Parse file and cache result
+                            print(f"🔄 Parsing {current_file}/{total_files}: {filename}")
+                            cached_data = parse_excel_to_hierarchical_structure_v10(file_path)
+                            extraction_metadata["cache_misses"] += 1
+                            
+                            # Cache the result
+                            try:
+                                file_cache[cache_key] = {
+                                    "file_path": file_path,
+                                    "file_mtime": os.path.getmtime(file_path),
+                                    "parsed_data": cached_data,
+                                    "filename": filename
+                                }
+                            except:
+                                pass  # Continue even if caching fails
+                        
+                        # Add to collection if parsing succeeded
+                        if cached_data is not None:
+                            wafer_from_parsed = cached_data["wafer"]
+                            vout_from_parsed = cached_data["vout"]
+                            cboot_from_parsed = cached_data["cboot"]
+                            
+                            # Initialize hierarchical structure
+                            if wafer_from_parsed not in collection_data:
+                                collection_data[wafer_from_parsed] = {}
+                                collection_time_base[wafer_from_parsed] = {}
+                                collection_metadata[wafer_from_parsed] = {
+                                    "wafer_directory": wafer_from_parsed,
+                                    "conditions": set(),
+                                    "files_processed": 0
+                                }
+                            
+                            if vout_from_parsed not in collection_data[wafer_from_parsed]:
+                                collection_data[wafer_from_parsed][vout_from_parsed] = {}
+                                collection_time_base[wafer_from_parsed][vout_from_parsed] = {}
+                            
+                            if cboot_from_parsed not in collection_data[wafer_from_parsed][vout_from_parsed]:
+                                collection_data[wafer_from_parsed][vout_from_parsed][cboot_from_parsed] = {}
+                                collection_time_base[wafer_from_parsed][vout_from_parsed][cboot_from_parsed] = cached_data["time_data"]
+                            
+                            # Store channel data
+                            if cached_data["ch1_data"]:
+                                collection_data[wafer_from_parsed][vout_from_parsed][cboot_from_parsed]["SW"] = cached_data["ch1_data"]
+                            if cached_data["ch3_data"]:
+                                collection_data[wafer_from_parsed][vout_from_parsed][cboot_from_parsed]["PH"] = cached_data["ch3_data"]
+                            
+                            # Update metadata
+                            extraction_metadata["files_processed"] += 1
+                            collection_metadata[wafer_from_parsed]["files_processed"] += 1
+                            condition_id = f"{wafer_from_parsed}_VOUT_{vout_from_parsed}V_CBOOT_{cboot_from_parsed}μF"
+                            extraction_metadata["conditions_found"].add(condition_id)
+                            collection_metadata[wafer_from_parsed]["conditions"].add(condition_id)
+                            extraction_metadata["wafers_found"].add(wafer_from_parsed)
+                        else:
+                            extraction_metadata["files_failed"] += 1
+        
+        # Save updated cache
+        final_cache_size = len(file_cache)
+        if final_cache_size > initial_cache_size:
+            save_file_cache(file_cache, base_path)
+        else:
+            print("📋 Cache unchanged, no save needed")
+        
+        # Convert sets to lists for JSON serialization
+        extraction_metadata["wafers_found"] = list(extraction_metadata["wafers_found"])
+        extraction_metadata["conditions_found"] = list(extraction_metadata["conditions_found"])
+        
+        for wafer_in_metadata in collection_metadata:
+            collection_metadata[wafer_in_metadata]["conditions"] = list(collection_metadata[wafer_in_metadata]["conditions"])
+        
+        collection_metadata["_extraction_summary"] = extraction_metadata
+        
+        print(f"📊 Cache performance: {extraction_metadata['cache_hits']} hits, {extraction_metadata['cache_misses']} misses")
+        if extraction_metadata['cache_misses'] > 0:
+            print(f"💾 Added {extraction_metadata['cache_misses']} new entries to cache")
+        
+        return TMScopeDataCollection(
+            data=collection_data,
+            time_base=collection_time_base,
+            metadata=collection_metadata
+        )
+
     # Build enhanced TMScopeDataCollection from discovered files with wafer hierarchy (v10)
     if tm_scope_files_discovered_v10 and tm_scope_base_path_v10:
-        print("🔄 Building Enhanced TMScopeDataCollection with wafer hierarchy (v10)...")
-
-        tm_scope_collection_v10 = build_tmscope_collection_v10(
+        tm_scope_collection_v10 = build_tmscope_collection_with_cache(
             tm_scope_files_discovered_v10,
             tm_scope_base_path_v10
         )
