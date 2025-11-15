@@ -2,18 +2,28 @@
 
 ## Executive Summary
 
-This report provides comprehensive guidance on using PyVISA to synchronize two Chroma 63600 series load modules for parallel operation, specifically for `set_cc_current` calls and simultaneous load activation to provide parallel current paths.
+This report provides comprehensive guidance on using PyVISA to synchronize Chroma 63600 series load modules for parallel operation, specifically for `set_CC_current` calls and simultaneous load activation to provide parallel current paths.
+
+**Updated**: This document has been revised to align with the actual driver implementation (`Equipment` base class and `Chroma_63600_5` subclass), which uses:
+- Single PyVISA connection for multi-channel control within one mainframe
+- `parallel_init()` method for master/slave channel configuration
+- Channel selection via `CHANNEL` command before each operation
+- SCPI commands: `CONFIGURE:PARALLEL:INIT`, `CONFIGURE:PARALLEL:MODE`, `CURR:STAT:L2`, `LOAD ON/OFF`
+
+The report also documents alternative architectures for multi-mainframe setups requiring separate VISA connections.
 
 ## Table of Contents
 
 1. [Overview of Parallel Operation](#overview-of-parallel-operation)
 2. [Hardware Configuration](#hardware-configuration)
 3. [SCPI Command Reference](#scpi-command-reference)
-4. [PyVISA Implementation](#pyvisa-implementation)
+4. [PyVISA Implementation](#pyvisa-implementation) - **Current Driver Architecture**
 5. [Synchronization Methods](#synchronization-methods)
 6. [GitHub Examples](#github-examples)
-7. [Complete Implementation Example](#complete-implementation-example)
+7. [Extending the Current Driver](#extending-the-current-driver) - **Recommended Enhancements**
 8. [Best Practices and Considerations](#best-practices-and-considerations)
+9. [Additional Resources](#additional-resources)
+10. [Conclusion](#conclusion)
 
 ---
 
@@ -175,307 +185,485 @@ Enables simultaneous control of all configured channels.
 
 ## PyVISA Implementation
 
+### Current Driver Architecture
+
+The driver is implemented using a base `Equipment` class with a specialized `Chroma_63600_5` subclass:
+
+```python
+import pyvisa
+from time import sleep
+
+class Equipment:
+    """Base class for PyVISA instrument control"""
+
+    def __init__(self, addr, delay=0.05, mock=False):
+        self.delay = delay
+        self.addr = addr
+        self.inst = None
+        self.mock_ = mock
+
+        # Auto-retry connection up to 5 times
+        attempt = 0
+        while attempt < 5:
+            try:
+                self.inst = pyvisa.ResourceManager().open_resource(self.addr)
+                self.inst.timeout = 30000  # 30 seconds
+                break
+            except pyvisa.errors.VisaIOError:
+                attempt += 1
+
+        self.IDN = self.query("*IDN?").strip()
+
+    def write(self, content):
+        """Write command with delay"""
+        sleep(self.delay)
+        self.inst.write(content)
+
+    def query(self, content):
+        """Query command with delay and error handling"""
+        sleep(self.delay)
+        try:
+            response = self.inst.query(content)
+        except pyvisa.errors.VisaIOError:
+            return ""
+        return response
+
+    def close(self):
+        self.inst.close()
+
+class Chroma_63600_5(Equipment):
+    """Chroma 63600-5 Series Electronic Load Controller"""
+
+    def __init__(self, addr):
+        super().__init__(addr)
+        self._output_on = False
+        self._current_output_load = 0.0
+```
+
 ### Basic Connection Setup
 
 ```python
-import visa
-import time
-
-# Initialize VISA resource manager
-rm = visa.ResourceManager()
-
-# Connect to load modules
-# Replace with your actual VISA addresses
-master_load = rm.open_resource('GPIB0::5::INSTR')
-slave_load = rm.open_resource('GPIB0::6::INSTR')
-
-# Set timeout (milliseconds)
-master_load.timeout = 5000
-slave_load.timeout = 5000
-
-# Query identity
-print(master_load.query('*IDN?'))
-print(slave_load.query('*IDN?'))
+# Connect to the Chroma load
+chroma = Chroma_63600_5('GPIB0::5::INSTR')
+print(f"Connected to: {chroma.IDN}")
 ```
 
 ### Configure Parallel Operation
 
+The `Chroma_63600_5` class includes a `parallel_init()` method for configuring parallel operation:
+
 ```python
-def configure_parallel_loads(master, slave):
-    """
-    Configure two loads for parallel operation.
+class Chroma_63600_5(Equipment):
+    # ... (previous code)
 
-    Args:
-        master: PyVISA resource object for master load
-        slave: PyVISA resource object for slave load
-    """
-    # Configure master module
-    master.write('CONF:PARA:MODE MASTER')
-    master.write('CONF:PARA:INIT ON')
+    def parallel_init(self, on_off='ON', master_chan=1, slave_list=[3]):
+        """
+        Initialize parallel operation mode.
 
-    # Configure slave module
-    slave.write('CONF:PARA:MODE SLAVE')
-    slave.write('CONF:PARA:INIT ON')
+        Args:
+            on_off: 'ON' or 'OFF' to enable/disable parallel mode
+            master_chan: Channel number for master (default 1)
+            slave_list: List of slave channel numbers (default [3])
+        """
+        # Select and configure master channel
+        self.write(f'CHANNEL {master_chan}')
+        sleep(0.05)
+        self.write(f'CONFIGURE:PARALLEL:INIT {on_off}')
+        sleep(0.05)
+        self.write(f'CONFIGURE:PARALLEL:MODE MASTER')
+        sleep(0.05)
 
-    # Allow time for configuration
-    time.sleep(0.5)
+        # Configure each slave channel
+        for i in slave_list:
+            self.write(f'CHANNEL {i}')
+            sleep(0.05)
+            self.write(f'CONFIGURE:PARALLEL:INIT {on_off}')
+            sleep(0.05)
+            self.write(f'CONFIGURE:PARALLEL:MODE SLAVE')
+            sleep(0.05)
 
-    # Verify configuration
-    master_mode = master.query('CONF:PARA:MODE?')
-    slave_mode = slave.query('CONF:PARA:MODE?')
+        # Enable output on slave channel (example shows channel 3)
+        self.output_on([3])
 
-    print(f"Master mode: {master_mode.strip()}")
-    print(f"Slave mode: {slave_mode.strip()}")
+# Usage example
+chroma = Chroma_63600_5('GPIB0::5::INSTR')
+chroma.parallel_init(on_off='ON', master_chan=1, slave_list=[3])
 ```
+
+**Key Implementation Notes:**
+- Uses `CHANNEL` command for channel selection (not `CHAN:LOAD`)
+- Uses `CONFIGURE:PARALLEL:INIT` (not `CONF:PARA:INIT`)
+- Uses `CONFIGURE:PARALLEL:MODE` (not `CONF:PARA:MODE`)
+- Includes 50ms delays between commands for device processing
+- Single instrument object controls multiple channels within one mainframe
 
 ### Set Constant Current Mode
 
-```python
-def set_cc_current(load, current, current_range='CCH'):
-    """
-    Set load to constant current mode with specified current.
-
-    Args:
-        load: PyVISA resource object
-        current: Current value in amperes
-        current_range: 'CCL', 'CCM', or 'CCH'
-    """
-    # Set current mode
-    load.write(f'MODE {current_range}')
-
-    # Set current level
-    load.write(f'CURR:STAT:L1 {current}')
-
-    # Verify setting
-    actual_current = load.query('CURR:STAT:L1?')
-    print(f"Set current: {current}A, Actual: {actual_current.strip()}A")
-```
-
-### Automatic Current Range Selection
-
-Based on the GitHub example, here's how to automatically select the appropriate current range:
+The driver implements two methods for setting constant current:
 
 ```python
-def get_current_range(current, max_ccl=0.2, max_ccm=2.0, max_cch=20.0, margin=0.9):
-    """
-    Determine appropriate current range based on current value.
+class Chroma_63600_5(Equipment):
+    # ... (previous code)
 
-    Args:
-        current: Desired current in amperes
-        max_ccl: Maximum CCL range current
-        max_ccm: Maximum CCM range current
-        max_cch: Maximum CCH range current
-        margin: Safety margin factor (0.9 = 90%)
+    def set_CC_current(self, load, channel=1, load_on=False):
+        """
+        Set constant current mode for a single channel.
 
-    Returns:
-        str: 'CCL', 'CCM', or 'CCH'
-    """
-    if current > (max_cch * margin):
-        raise ValueError(f"Current {current}A exceeds maximum rating")
-    elif current > (max_ccm * margin):
-        return 'CCH'
-    elif current > (max_ccl * margin):
-        return 'CCM'
-    else:
-        return 'CCL'
+        Args:
+            load: Current value in amperes
+            channel: Channel number (default 1)
+            load_on: If True, turn on load after setting current
+        """
+        self.write(f'CHANNEL {channel}')
+        sleep(0.05)
+        self.write('MODE CCH')
+        sleep(0.05)
+        self.write(f"CURR:STAT:L2 {load}")  # Note: Uses L2, not L1
+        self._current_output_load = load  # State tracking
+        if load_on:
+            self.output_on()
 
-def set_cc_current_auto(load, current):
-    """
-    Set CC current with automatic range selection.
-    """
-    # Adjust these values based on your specific load model
-    # Example for 63610-80-20: CCH=20A, CCM=2A, CCL=0.2A
-    current_range = get_current_range(current)
-    set_cc_current(load, current, current_range)
+    def set_CC_current_multiple(self, load_list, channel_list=1, load_on=False):
+        """
+        Set constant current mode for multiple channels.
+
+        Args:
+            load_list: Dictionary/list of current values indexed by channel
+            channel_list: List of channel numbers or single channel
+            load_on: If True, turn on load after setting current
+        """
+        for channel in channel_list:
+            self.write(f'CHANNEL {channel}')
+            sleep(0.05)
+            self.write('MODE CCH')
+            sleep(0.05)
+            self.write(f"CURR:STAT:L2 {load_list[channel]}")
+            if load_on:
+                self.output_on()
+
+# Usage examples
+chroma = Chroma_63600_5('GPIB0::5::INSTR')
+
+# Single channel
+chroma.set_CC_current(load=10.5, channel=1, load_on=True)
+
+# Multiple channels
+load_values = {1: 5.0, 3: 5.0}  # 5A on channels 1 and 3
+chroma.set_CC_current_multiple(load_list=load_values,
+                               channel_list=[1, 3],
+                               load_on=True)
 ```
 
-### Synchronized Load Activation
+**Key Implementation Notes:**
+- Uses `CURR:STAT:L2` instead of `CURR:STAT:L1` (static current level 2)
+- Always selects channel before setting mode and current
+- Includes state tracking with `_current_output_load`
+- Fixed to CCH mode (modify for CCL/CCM if needed)
 
-The critical part for parallel operation - turning on loads simultaneously:
+### Measurement Methods
 
-#### Method 1: Master-Only Control (Recommended for Parallel Mode)
-
-When properly configured in master/slave mode, commanding the master automatically controls the slave:
+The driver includes methods for measuring voltage, current, and power:
 
 ```python
-def synchronized_load_on_parallel(master_load, slave_load, current):
-    """
-    Turn on parallel loads simultaneously using master/slave configuration.
+class Chroma_63600_5(Equipment):
+    # ... (previous code)
 
-    Args:
-        master_load: Master load resource
-        slave_load: Slave load resource
-        current: Total current to be split between loads
-    """
-    # In parallel mode, each load carries current, so split the total
-    current_per_load = current / 2.0
+    def measure_voltage(self, channel=1):
+        """Measure voltage on specified channel"""
+        self.write(f'CHANNEL {channel}')
+        sleep(0.05)
+        return float(self.query('FETCH:voltage?'))
 
-    # Set current on master (will propagate to slave in smart mode)
-    set_cc_current_auto(master_load, current_per_load)
+    def measure_current(self, channel=1):
+        """Measure current on specified channel"""
+        self.write(f'CHANNEL {channel}')
+        sleep(0.05)
+        return float(self.query('FETCH:CURRENT?'))
 
-    # Turn on master load (should control both in parallel mode)
-    master_load.write('LOAD:STAT ON')
+    def measure_power(self, channel=1):
+        """Measure power on specified channel"""
+        self.write(f'CHANNEL {channel}')
+        sleep(0.05)
+        return float(self.query('FETCH:POWER?'))
 
-    print(f"Parallel loads activated: {current_per_load}A each, {current}A total")
+# Usage example
+voltage = chroma.measure_voltage(channel=1)
+current = chroma.measure_current(channel=1)
+power = chroma.measure_power(channel=1)
+print(f"Channel 1: {voltage}V, {current}A, {power}W")
 ```
 
-#### Method 2: GPIB Group Execute Trigger (Most Precise Timing)
+**Key Implementation Notes:**
+- Uses `FETCH:` commands (not `MEAS:`)
+- Channel selection before each measurement
+- Returns float values directly
 
-For the most precise synchronization timing using GPIB:
+### Load Output Control
+
+The driver includes methods for controlling load output with state tracking:
 
 ```python
-def synchronized_load_on_gpib(rm, master_addr, slave_addr, current):
-    """
-    Turn on loads with precise GPIB synchronization.
+class Chroma_63600_5(Equipment):
+    # ... (previous code)
 
-    Args:
-        rm: VISA ResourceManager
-        master_addr: GPIB address string for master (e.g., 'GPIB0::5::INSTR')
-        slave_addr: GPIB address string for slave (e.g., 'GPIB0::6::INSTR')
-        current: Current per load in amperes
-    """
-    # Open interface and instruments
-    intf = rm.open_resource('GPIB0::INTFC')
-    master = rm.open_resource(master_addr)
-    slave = rm.open_resource(slave_addr)
+    def output_on(self, channel_list=[1]):
+        """
+        Turn on load for specified channels.
 
-    # Configure both loads
-    set_cc_current_auto(master, current)
-    set_cc_current_auto(slave, current)
+        Args:
+            channel_list: List of channel numbers to turn on (default [1])
+        """
+        for channel in channel_list:
+            self.write(f'CHANNEL {channel}')
+            sleep(0.05)
+            self.write("LOAD ON")
+            sleep(0.05)
+        self._output_on = True
 
-    # Prepare both loads (don't turn on yet)
-    master.write('*TRG')  # Arm for trigger
-    slave.write('*TRG')
+    def output_off(self, channel_list=[1]):
+        """
+        Turn off load for specified channels.
 
-    # Use group execute trigger for simultaneous activation
-    intf.group_execute_trigger(master, slave)
+        Args:
+            channel_list: List of channel numbers to turn off (default [1])
+        """
+        for channel in channel_list:
+            self.write(f'CHANNEL {channel}')
+            sleep(0.05)
+            self.write("LOAD OFF")
+            sleep(0.05)
+        self._output_on = False
 
-    print(f"Loads synchronized via GPIB trigger: {current}A each")
+    def return_load_state(self, channel_list=[1]):
+        """
+        Query load state for specified channel.
+
+        Returns:
+            'OFF' or 'ON' for the specified channel
+        """
+        self.write(f'CHANNEL {channel_list}')
+        sleep(0.05)
+        return self.query(f'LOAD:STATE?')
+
+# Usage examples
+chroma = Chroma_63600_5('GPIB0::5::INSTR')
+
+# Turn on multiple channels
+chroma.output_on(channel_list=[1, 3])
+
+# Check state
+state = chroma.return_load_state(channel_list=1)
+print(f"Channel 1 state: {state}")
+
+# Turn off
+chroma.output_off(channel_list=[1, 3])
 ```
 
-#### Method 3: Sequential with Minimal Delay
+**Key Implementation Notes:**
+- Uses `LOAD ON` and `LOAD OFF` (not `LOAD:STAT ON/OFF`)
+- Supports multiple channels via `channel_list` parameter
+- Includes state tracking with `_output_on` boolean
+- Channel selection before each load command
 
-For non-GPIB interfaces or when GPIB trigger is unavailable:
+### Synchronized Load Activation for Parallel Operation
+
+Using the driver's built-in methods, here's the complete workflow for parallel operation:
 
 ```python
-def synchronized_load_on_sequential(master_load, slave_load, current):
-    """
-    Turn on loads sequentially with minimal delay.
-    Less precise than GPIB trigger but works with any interface.
+from time import sleep
 
-    Args:
-        master_load: Master load resource
-        slave_load: Slave load resource
-        current: Current per load in amperes
-    """
-    # Pre-configure both loads
-    set_cc_current_auto(master_load, current)
-    set_cc_current_auto(slave_load, current)
+# Initialize connection
+chroma = Chroma_63600_5('GPIB0::5::INSTR')
 
-    # Turn on both loads as quickly as possible
-    # Use write (not query) to avoid waiting for response
-    master_load.write('LOAD:STAT ON')
-    slave_load.write('LOAD:STAT ON')
+# Step 1: Configure parallel mode with master channel 1 and slave channel 3
+chroma.parallel_init(on_off='ON', master_chan=1, slave_list=[3])
 
-    # Optional: verify both are on
-    time.sleep(0.1)
-    master_status = master_load.query('LOAD:STAT?')
-    slave_status = slave_load.query('LOAD:STAT?')
+# Step 2: Set constant current on both channels
+# For parallel operation, set the same current on each channel
+load_values = {
+    1: 10.0,  # Master: 10A
+    3: 10.0   # Slave: 10A
+}
+chroma.set_CC_current_multiple(
+    load_list=load_values,
+    channel_list=[1, 3],
+    load_on=False  # Don't turn on yet
+)
 
-    print(f"Master status: {master_status.strip()}")
-    print(f"Slave status: {slave_status.strip()}")
+# Alternative: Set individually
+chroma.set_CC_current(load=10.0, channel=1, load_on=False)
+chroma.set_CC_current(load=10.0, channel=3, load_on=False)
+
+# Step 3: Turn on both channels (synchronized activation)
+chroma.output_on(channel_list=[1, 3])
+
+# Step 4: Monitor both channels
+sleep(1.0)  # Allow settling time
+
+master_voltage = chroma.measure_voltage(channel=1)
+master_current = chroma.measure_current(channel=1)
+master_power = chroma.measure_power(channel=1)
+
+slave_voltage = chroma.measure_voltage(channel=3)
+slave_current = chroma.measure_current(channel=3)
+slave_power = chroma.measure_power(channel=3)
+
+print(f"Master (Ch 1): {master_voltage:.2f}V, {master_current:.2f}A, {master_power:.2f}W")
+print(f"Slave (Ch 3): {slave_voltage:.2f}V, {slave_current:.2f}A, {slave_power:.2f}W")
+print(f"Total: {master_current + slave_current:.2f}A, {master_power + slave_power:.2f}W")
+
+# Step 5: Turn off both channels
+chroma.output_off(channel_list=[1, 3])
+
+# Cleanup
+chroma.close()
 ```
+
+**Architecture Note:**
+- This implementation uses **multi-channel control within a single mainframe**
+- Channels 1 and 3 are within the same physical instrument
+- Communication is through a single PyVISA connection
+- Synchronization is handled by the instrument's internal firmware
 
 ### Complete Workflow Example
 
+Here's a complete test function using the actual driver implementation:
+
 ```python
-def parallel_load_test(master_addr, slave_addr, test_current):
+def parallel_load_test(visa_addr, master_chan, slave_chans, test_current_per_channel):
     """
-    Complete example of parallel load operation.
+    Complete example of parallel load operation using Chroma_63600_5 driver.
 
     Args:
-        master_addr: VISA address of master load
-        slave_addr: VISA address of slave load
-        test_current: Total test current in amperes
+        visa_addr: VISA address of the Chroma instrument
+        master_chan: Master channel number
+        slave_chans: List of slave channel numbers
+        test_current_per_channel: Current per channel in amperes
     """
-    # Initialize
-    rm = visa.ResourceManager()
-    master = rm.open_resource(master_addr)
-    slave = rm.open_resource(slave_addr)
-
-    master.timeout = 5000
-    slave.timeout = 5000
+    # Initialize connection
+    chroma = Chroma_63600_5(visa_addr)
+    print(f"Connected to: {chroma.IDN}")
 
     try:
         # Step 1: Configure parallel operation
-        print("Configuring parallel operation...")
-        configure_parallel_loads(master, slave)
+        print(f"\nConfiguring parallel operation...")
+        print(f"  Master: Channel {master_chan}")
+        print(f"  Slaves: Channels {slave_chans}")
+        chroma.parallel_init(on_off='ON', master_chan=master_chan, slave_list=slave_chans)
 
-        # Step 2: Set current (split between loads)
-        current_per_load = test_current / 2.0
-        print(f"\nSetting current: {current_per_load}A per load")
-        set_cc_current_auto(master, current_per_load)
+        # Step 2: Set current on all channels
+        all_channels = [master_chan] + slave_chans
+        print(f"\nSetting current: {test_current_per_channel}A per channel")
 
-        # In master/slave mode, slave follows master automatically
-        # But you can explicitly set it too:
-        set_cc_current_auto(slave, current_per_load)
+        for channel in all_channels:
+            chroma.set_CC_current(
+                load=test_current_per_channel,
+                channel=channel,
+                load_on=False
+            )
 
-        # Step 3: Turn on loads synchronously
-        print("\nActivating loads...")
-        synchronized_load_on_parallel(master, slave, test_current)
+        # Step 3: Turn on all channels synchronously
+        print(f"\nActivating channels {all_channels}...")
+        chroma.output_on(channel_list=all_channels)
 
-        # Step 4: Monitor (example)
-        time.sleep(1)
-        master_voltage = master.query('MEAS:VOLT?')
-        master_current = master.query('MEAS:CURR?')
-        slave_voltage = slave.query('MEAS:VOLT?')
-        slave_current = slave.query('MEAS:CURR?')
-
+        # Step 4: Monitor all channels
+        sleep(1.0)  # Allow settling
         print(f"\nMeasurements:")
-        print(f"Master: {master_voltage.strip()}V, {master_current.strip()}A")
-        print(f"Slave: {slave_voltage.strip()}V, {slave_current.strip()}A")
 
-        # Step 5: Turn off loads
-        print("\nDeactivating loads...")
-        master.write('LOAD:STAT OFF')
-        slave.write('LOAD:STAT OFF')
+        total_current = 0.0
+        total_power = 0.0
+
+        for channel in all_channels:
+            voltage = chroma.measure_voltage(channel=channel)
+            current = chroma.measure_current(channel=channel)
+            power = chroma.measure_power(channel=channel)
+
+            total_current += current
+            total_power += power
+
+            role = "Master" if channel == master_chan else "Slave"
+            print(f"  Ch {channel} ({role}): {voltage:.2f}V, {current:.2f}A, {power:.2f}W")
+
+        print(f"  Total: {total_current:.2f}A, {total_power:.2f}W")
+
+        # Step 5: Check load states
+        print(f"\nLoad states:")
+        for channel in all_channels:
+            state = chroma.return_load_state(channel_list=channel)
+            print(f"  Ch {channel}: {state.strip()}")
+
+        # Step 6: Turn off all channels
+        print(f"\nDeactivating channels...")
+        chroma.output_off(channel_list=all_channels)
+
+        print(f"\nTest completed successfully")
+
+    except Exception as e:
+        print(f"\nError occurred: {e}")
+        # Emergency shutdown
+        try:
+            chroma.output_off(channel_list=all_channels)
+        except:
+            pass
+        raise
 
     finally:
         # Cleanup
-        master.close()
-        slave.close()
-        rm.close()
+        chroma.close()
 
 # Usage example
 if __name__ == '__main__':
-    parallel_load_test('GPIB0::5::INSTR', 'GPIB0::6::INSTR', 20.0)
+    # Test with master channel 1, slave channel 3, 10A per channel
+    parallel_load_test(
+        visa_addr='GPIB0::5::INSTR',
+        master_chan=1,
+        slave_chans=[3],
+        test_current_per_channel=10.0
+    )
 ```
 
 ---
 
 ## Synchronization Methods
 
-### Comparison of Synchronization Approaches
+### Implementation Architecture
 
-| Method | Precision | Interface | Complexity | Use Case |
-|--------|-----------|-----------|------------|----------|
-| Master/Slave | Good | Any | Low | Recommended for most parallel operations |
-| GPIB Trigger | Excellent | GPIB only | Medium | Critical timing requirements |
-| Sequential | Fair | Any | Low | Non-critical applications |
+The current driver implementation uses **multi-channel parallel operation within a single mainframe**:
+
+| Aspect | Implementation Details |
+|--------|----------------------|
+| **Architecture** | Single PyVISA connection controlling multiple channels |
+| **Channels** | Master and slave channels within same instrument |
+| **Synchronization** | Hardware-level synchronization via internal bus |
+| **Communication** | Sequential channel selection with SCPI commands |
+| **Timing** | Built-in delays (50ms) between commands |
 
 ### Timing Considerations
 
-1. **Master/Slave Mode**: The slave automatically follows master commands with minimal delay (typically microseconds)
-2. **GPIB Group Trigger**: Simultaneous trigger to multiple devices, synchronization within nanoseconds
-3. **Sequential Commands**: Delay depends on interface (GPIB: ~1-5ms, USB: ~10-50ms, Ethernet: variable)
+1. **Channel Selection**: Each operation requires channel selection with 50ms delay
+2. **Mode Configuration**: 50ms delay after parallel mode initialization
+3. **Load Activation**: Sequential activation with 50ms per channel
+4. **Measurements**: Channel selection required before each measurement
+5. **Settling Time**: 1-2 seconds recommended after load activation for stable readings
 
-### Best Synchronization Practice
+### Current Implementation vs. Alternatives
 
-For parallel current paths, the **Master/Slave configuration is recommended** because:
-- Automatic current distribution
-- Built-in synchronization
-- Simplified programming (command master only)
-- Reliable parallel operation
+| Approach | Current Driver | Alternative (Separate Instruments) |
+|----------|---------------|-----------------------------------|
+| Connection | Single VISA address | Multiple VISA addresses |
+| Channel Control | CHANNEL command | Separate instrument objects |
+| Synchronization | Internal firmware | External (GPIB trigger or sequential) |
+| Complexity | Lower | Higher |
+| Scalability | Limited to channels in one mainframe | Can span multiple mainframes |
+
+### Best Practices for Current Implementation
+
+For the existing driver architecture:
+1. **Always select channel** before operations (automatic in methods)
+2. **Use channel lists** for coordinated operations
+3. **Leverage parallel_init()** for proper master/slave setup
+4. **Set current on all channels** before activation
+5. **Monitor all channels** to verify balanced operation
 
 ---
 
@@ -613,315 +801,209 @@ chroma.write("LOAD OFF")
 
 ---
 
-## Complete Implementation Example
+## Extending the Current Driver
 
-Here's a production-ready class for controlling Chroma 63600 loads in parallel:
+### Recommended Enhancements
+
+The current `Chroma_63600_5` implementation can be extended with the following enhancements:
+
+#### 1. Add Automatic Current Range Selection
 
 ```python
-"""
-Chroma 63600 Parallel Load Controller
-Supports synchronized operation of two load modules
-"""
+class Chroma_63600_5(Equipment):
+    # ... (existing code)
 
-import visa
-import time
-from typing import Optional, Tuple
-from enum import Enum
-
-class CurrentRange(Enum):
-    """Current range enumeration"""
-    CCL = "CCL"  # Low range
-    CCM = "CCM"  # Medium range
-    CCH = "CCH"  # High range
-
-class ParallelMode(Enum):
-    """Parallel configuration modes"""
-    NONE = "NONE"
-    MASTER = "MASTER"
-    SLAVE = "SLAVE"
-
-class LoadSpecs:
-    """Load module specifications"""
-    def __init__(self, model: str):
-        self.model = model
-
-        # Default specs for 63610-80-20
-        # Adjust based on your actual model
-        if "63610-80-20" in model:
-            self.ccl_max = 0.2   # 200mA
-            self.ccm_max = 2.0   # 2A
-            self.cch_max = 20.0  # 20A
-            self.voltage_max = 80.0  # 80V
-            self.power_max = 200.0   # 200W
-        else:
-            # Add other model specs as needed
-            raise ValueError(f"Unknown model: {model}")
-
-class Chroma63600Load:
-    """
-    Controller for a single Chroma 63600 load module
-    """
-
-    def __init__(self, visa_address: str, timeout: int = 5000):
+    def mode_sel_auto(self, current):
         """
-        Initialize load controller
-
-        Args:
-            visa_address: VISA resource address (e.g., 'GPIB0::5::INSTR')
-            timeout: Command timeout in milliseconds
-        """
-        self.rm = visa.ResourceManager()
-        self.load = self.rm.open_resource(visa_address)
-        self.load.timeout = timeout
-        self.address = visa_address
-
-        # Get identity
-        self.identity = self.load.query('*IDN?').strip()
-
-        # Get specs
-        self.specs = LoadSpecs(self.identity)
-
-        print(f"Connected to: {self.identity}")
-
-    def configure_parallel(self, mode: ParallelMode):
-        """Configure parallel operation mode"""
-        self.load.write(f'CONF:PARA:MODE {mode.value}')
-        time.sleep(0.2)
-
-        # Verify
-        actual_mode = self.load.query('CONF:PARA:MODE?').strip()
-        print(f"Parallel mode set to: {actual_mode}")
-
-    def initialize_parallel(self, enable: bool):
-        """Initialize or exit parallel mode"""
-        state = "ON" if enable else "OFF"
-        self.load.write(f'CONF:PARA:INIT {state}')
-        time.sleep(0.2)
-
-    def get_current_range(self, current: float, margin: float = 0.9) -> CurrentRange:
-        """
-        Determine appropriate current range
-
-        Args:
-            current: Desired current in amperes
-            margin: Safety margin (default 90%)
-
-        Returns:
-            CurrentRange enum value
-        """
-        if current > self.specs.cch_max * margin:
-            raise ValueError(f"Current {current}A exceeds maximum {self.specs.cch_max}A")
-        elif current > self.specs.ccm_max * margin:
-            return CurrentRange.CCH
-        elif current > self.specs.ccl_max * margin:
-            return CurrentRange.CCM
-        else:
-            return CurrentRange.CCL
-
-    def set_cc_current(self, current: float,
-                      current_range: Optional[CurrentRange] = None,
-                      slew_rate: Optional[float] = None):
-        """
-        Set constant current mode and current level
+        Automatically select current mode based on current value.
 
         Args:
             current: Current in amperes
-            current_range: Specific range, or None for auto
-            slew_rate: Optional slew rate in A/ms
-        """
-        # Auto-select range if not specified
-        if current_range is None:
-            current_range = self.get_current_range(current)
-
-        # Set mode
-        self.load.write(f'MODE {current_range.value}')
-
-        # Set current
-        self.load.write(f'CURR:STAT:L1 {current}')
-
-        # Set slew rate if specified
-        if slew_rate is not None:
-            self.load.write(f'CURR:STAT:RISE {slew_rate}')
-            self.load.write(f'CURR:STAT:FALL {slew_rate}')
-
-        # Verify
-        actual_current = float(self.load.query('CURR:STAT:L1?'))
-        print(f"{self.address}: Set {current}A, Range {current_range.value}, Actual {actual_current}A")
-
-    def turn_on(self):
-        """Turn load on"""
-        self.load.write('LOAD:STAT ON')
-
-    def turn_off(self):
-        """Turn load off"""
-        self.load.write('LOAD:STAT OFF')
-
-    def measure(self) -> Tuple[float, float, float]:
-        """
-        Measure voltage, current, and power
 
         Returns:
-            Tuple of (voltage, current, power)
+            Selected mode string ('CCL', 'CCM', or 'CCH')
         """
-        voltage = float(self.load.query('MEAS:VOLT?'))
-        current = float(self.load.query('MEAS:CURR?'))
-        power = float(self.load.query('MEAS:POW?'))
-        return voltage, current, power
+        # Adjust these thresholds based on your model specifications
+        # Example for 63610-80-20: CCH=20A, CCM=2A, CCL=0.2A
+        if current > 18.0:  # 90% of 20A max
+            mode = "CCH"
+        elif current > 1.8:  # 90% of 2A max
+            mode = "CCM"
+        else:
+            mode = "CCL"
 
-    def close(self):
-        """Close connection"""
-        self.load.close()
+        self.mode_sel(mode)
+        return mode
 
-class Chroma63600ParallelSystem:
-    """
-    Controller for parallel operation of two Chroma 63600 loads
-    """
-
-    def __init__(self, master_address: str, slave_address: str, timeout: int = 5000):
+    def set_CC_current_auto(self, load, channel=1, load_on=False):
         """
-        Initialize parallel load system
+        Set constant current with automatic range selection.
 
         Args:
-            master_address: VISA address of master load
-            slave_address: VISA address of slave load
-            timeout: Command timeout in milliseconds
+            load: Current value in amperes
+            channel: Channel number (default 1)
+            load_on: If True, turn on load after setting current
         """
-        self.master = Chroma63600Load(master_address, timeout)
-        self.slave = Chroma63600Load(slave_address, timeout)
+        self.write(f'CHANNEL {channel}')
+        sleep(0.05)
 
-        print("\nConfiguring parallel operation...")
-        self.configure_parallel()
+        # Auto-select mode
+        mode = self.mode_sel_auto(load)
 
-    def configure_parallel(self):
-        """Configure master/slave parallel operation"""
-        self.master.configure_parallel(ParallelMode.MASTER)
-        self.master.initialize_parallel(True)
+        self.write(f"CURR:STAT:L2 {load}")
+        self._current_output_load = load
+        if load_on:
+            self.output_on([channel])
 
-        self.slave.configure_parallel(ParallelMode.SLAVE)
-        self.slave.initialize_parallel(True)
-
-        time.sleep(0.5)
-        print("Parallel configuration complete")
-
-    def set_parallel_current(self, total_current: float,
-                            current_range: Optional[CurrentRange] = None):
-        """
-        Set current for parallel operation
-
-        Args:
-            total_current: Total current to be split between loads
-            current_range: Optional specific current range
-        """
-        current_per_load = total_current / 2.0
-
-        print(f"\nSetting parallel current: {total_current}A total ({current_per_load}A each)")
-
-        # Set both loads
-        self.master.set_cc_current(current_per_load, current_range)
-        self.slave.set_cc_current(current_per_load, current_range)
-
-    def turn_on_synchronized(self):
-        """
-        Turn on both loads with minimal delay
-        In master/slave mode, commanding master should control both
-        """
-        print("\nActivating parallel loads...")
-
-        # In true master/slave mode, this might be sufficient:
-        self.master.turn_on()
-
-        # But for safety, also command slave:
-        self.slave.turn_on()
-
-        time.sleep(0.1)
-        print("Loads activated")
-
-    def turn_off_synchronized(self):
-        """Turn off both loads"""
-        print("\nDeactivating parallel loads...")
-
-        self.master.turn_off()
-        self.slave.turn_off()
-
-        time.sleep(0.1)
-        print("Loads deactivated")
-
-    def measure_both(self) -> dict:
-        """
-        Measure both loads
-
-        Returns:
-            Dictionary with measurements from both loads
-        """
-        master_v, master_i, master_p = self.master.measure()
-        slave_v, slave_i, slave_p = self.slave.measure()
-
-        return {
-            'master': {'voltage': master_v, 'current': master_i, 'power': master_p},
-            'slave': {'voltage': slave_v, 'current': slave_i, 'power': slave_p},
-            'total': {'current': master_i + slave_i, 'power': master_p + slave_p}
-        }
-
-    def close(self):
-        """Close both connections"""
-        self.master.close()
-        self.slave.close()
-
-# Example usage
-def main():
-    """Example of parallel load operation"""
-
-    # Create parallel system
-    system = Chroma63600ParallelSystem(
-        master_address='GPIB0::5::INSTR',
-        slave_address='GPIB0::6::INSTR'
-    )
-
-    try:
-        # Test sequence
-        test_currents = [5.0, 10.0, 15.0, 20.0]  # Amperes
-
-        for current in test_currents:
-            print(f"\n{'='*60}")
-            print(f"Testing at {current}A total current")
-            print('='*60)
-
-            # Set current
-            system.set_parallel_current(current)
-
-            # Turn on
-            system.turn_on_synchronized()
-
-            # Wait for settling
-            time.sleep(2)
-
-            # Measure
-            measurements = system.measure_both()
-
-            print("\nMeasurements:")
-            print(f"  Master: {measurements['master']['voltage']:.3f}V, "
-                  f"{measurements['master']['current']:.3f}A, "
-                  f"{measurements['master']['power']:.3f}W")
-            print(f"  Slave:  {measurements['slave']['voltage']:.3f}V, "
-                  f"{measurements['slave']['current']:.3f}A, "
-                  f"{measurements['slave']['power']:.3f}W")
-            print(f"  Total:  {measurements['total']['current']:.3f}A, "
-                  f"{measurements['total']['power']:.3f}W")
-
-            # Turn off
-            system.turn_off_synchronized()
-
-            # Wait between tests
-            time.sleep(1)
-
-    finally:
-        # Cleanup
-        system.close()
-        print("\nTest complete")
-
-if __name__ == '__main__':
-    main()
+        return mode
 ```
+
+#### 2. Add Comprehensive Error Checking
+
+```python
+class Chroma_63600_5(Equipment):
+    # ... (existing code)
+
+    def check_errors(self):
+        """
+        Query and return system errors.
+
+        Returns:
+            Error string from instrument
+        """
+        return self.query('SYST:ERR?').strip()
+
+    def verify_parallel_config(self, master_chan, slave_chans):
+        """
+        Verify parallel configuration is correct.
+
+        Args:
+            master_chan: Expected master channel
+            slave_chans: List of expected slave channels
+
+        Returns:
+            bool: True if configuration is correct
+        """
+        # Check master
+        self.write(f'CHANNEL {master_chan}')
+        sleep(0.05)
+        master_mode = self.query('CONFIGURE:PARALLEL:MODE?').strip()
+
+        if 'MASTER' not in master_mode.upper():
+            print(f"Warning: Channel {master_chan} is not configured as MASTER")
+            return False
+
+        # Check slaves
+        for chan in slave_chans:
+            self.write(f'CHANNEL {chan}')
+            sleep(0.05)
+            slave_mode = self.query('CONFIGURE:PARALLEL:MODE?').strip()
+
+            if 'SLAVE' not in slave_mode.upper():
+                print(f"Warning: Channel {chan} is not configured as SLAVE")
+                return False
+
+        return True
+```
+
+#### 3. Add Batch Measurement Capability
+
+```python
+class Chroma_63600_5(Equipment):
+    # ... (existing code)
+
+    def measure_all(self, channel_list):
+        """
+        Measure voltage, current, and power for multiple channels.
+
+        Args:
+            channel_list: List of channel numbers to measure
+
+        Returns:
+            Dictionary of measurements indexed by channel
+        """
+        measurements = {}
+
+        for channel in channel_list:
+            measurements[channel] = {
+                'voltage': self.measure_voltage(channel),
+                'current': self.measure_current(channel),
+                'power': self.measure_power(channel)
+            }
+
+        return measurements
+
+    def print_measurements(self, measurements, channel_roles=None):
+        """
+        Pretty-print measurements.
+
+        Args:
+            measurements: Dictionary from measure_all()
+            channel_roles: Optional dict mapping channel to role ('Master'/'Slave')
+        """
+        total_current = 0.0
+        total_power = 0.0
+
+        for channel, data in measurements.items():
+            role = f" ({channel_roles[channel]})" if channel_roles else ""
+            print(f"Ch {channel}{role}: {data['voltage']:.2f}V, "
+                  f"{data['current']:.2f}A, {data['power']:.2f}W")
+
+            total_current += data['current']
+            total_power += data['power']
+
+        print(f"Total: {total_current:.2f}A, {total_power:.2f}W")
+```
+
+#### 4. Add Context Manager Support
+
+```python
+class Chroma_63600_5(Equipment):
+    # ... (existing code)
+
+    def __enter__(self):
+        """Context manager entry"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - ensure loads are off"""
+        try:
+            # Query all channels and turn them off
+            # This is a safety measure
+            self.output_off(channel_list=[1, 2, 3, 4, 5])
+        except:
+            pass
+        finally:
+            self.close()
+
+# Usage with context manager
+with Chroma_63600_5('GPIB0::5::INSTR') as chroma:
+    chroma.parallel_init(on_off='ON', master_chan=1, slave_list=[3])
+    chroma.set_CC_current(load=10.0, channel=1, load_on=True)
+    # ... test code ...
+    # Automatically turns off and closes on exit
+```
+
+### Alternative Architecture: Multi-Instrument Control
+
+For scenarios requiring control of **separate mainframes** (not just channels within one mainframe), you would need a different architecture:
+
+**Key Differences:**
+- Multiple VISA connections (one per mainframe)
+- Master/slave configured on separate physical instruments
+- External synchronization (GPIB trigger or sequential commands)
+- Physical System Bus cable connections between mainframes
+
+**Reference Implementation:**
+See the GitHub examples section above, particularly:
+- **Korrigan36/External-Ports**: Demonstrates parallel configuration with `CONF:PARA:MODE` commands
+- Uses separate VISA instrument objects for master and slave
+- Implements synchronization through sequential commands or GPIB triggers
+
+**When to Use:**
+- Need more channels than available in single mainframe
+- Require higher total power than single mainframe supports
+- Scaling beyond 10 channels (maximum per mainframe)
 
 ---
 
@@ -934,28 +1016,30 @@ if __name__ == '__main__':
 - **Power ratings**: Verify combined power dissipation doesn't exceed chassis limits
 - **Cooling**: Ensure adequate ventilation for parallel operation (higher power)
 
-### 2. Software Configuration
+### 2. Software Configuration (Current Driver)
 
-- **Always configure master first**, then slave
-- **Verify parallel mode** with query commands before operation
-- **Use appropriate current ranges** - don't overdrive low ranges
-- **Implement error checking** for all SCPI commands
+- **Use `parallel_init()` method** to configure master and slave channels
+- **Set current on all channels** before turning on loads
+- **Use channel lists** for coordinated operations (`output_on`, `output_off`)
+- **Implement error checking** using `check_errors()` method (if extended as recommended)
+- **Verify configuration** with `verify_parallel_config()` (if extended as recommended)
 
 ### 3. Current Distribution
 
-- In **master/slave mode**, current should distribute evenly
-- Monitor both loads to verify balanced operation
+- In **master/slave mode**, current should distribute evenly across parallel channels
+- Monitor all channels using `measure_all()` to verify balanced operation
 - If imbalance occurs, check:
-  - Physical connections
-  - Cable quality
+  - Parallel configuration (master/slave roles)
+  - Channel selection and mode settings
   - Load calibration
-  - Module specifications match
+  - Physical connections (if multi-mainframe)
 
-### 4. Timing Considerations
+### 4. Timing Considerations (Current Driver)
 
-- **Settling time**: Allow 50-100ms after configuration changes
-- **Measurement delay**: Wait 1-2s after load activation for stable readings
-- **Command delays**: Don't send commands faster than device can process (~10ms minimum)
+- **Built-in delays**: Driver includes 50ms delays after channel selection and mode changes
+- **Settling time**: Wait 1-2s after `output_on()` for stable measurements
+- **Sequential operations**: Channel selection and command execution are sequential
+- **Measurement timing**: Each `measure_*()` call includes channel selection delay
 
 ### 5. Safety
 
@@ -964,40 +1048,85 @@ if __name__ == '__main__':
 - **Thermal monitoring**: Monitor load temperatures during high-power tests
 - **Emergency stop**: Implement quick shutdown capability
 
-### 6. Error Handling
+### 6. Error Handling (Current Driver)
 
 ```python
-def safe_load_operation(system, current):
-    """Example with error handling"""
+def safe_parallel_load_test(visa_addr, master_chan, slave_chans, current):
+    """Example with error handling using current driver"""
+    chroma = None
+    all_channels = [master_chan] + slave_chans
+
     try:
-        system.set_parallel_current(current)
-        system.turn_on_synchronized()
+        # Initialize
+        chroma = Chroma_63600_5(visa_addr)
 
-        # Check for errors
-        master_errors = system.master.load.query('SYST:ERR?')
-        slave_errors = system.slave.load.query('SYST:ERR?')
+        # Configure parallel
+        chroma.parallel_init(on_off='ON',
+                            master_chan=master_chan,
+                            slave_list=slave_chans)
 
-        if 'No error' not in master_errors:
-            print(f"Master error: {master_errors}")
-            raise RuntimeError("Master load error")
+        # Verify configuration (if verify method is implemented)
+        # if not chroma.verify_parallel_config(master_chan, slave_chans):
+        #     raise RuntimeError("Parallel configuration verification failed")
 
-        if 'No error' not in slave_errors:
-            print(f"Slave error: {slave_errors}")
-            raise RuntimeError("Slave load error")
+        # Set current on all channels
+        for channel in all_channels:
+            chroma.set_CC_current(load=current,
+                                channel=channel,
+                                load_on=False)
 
-        # Proceed with test...
+        # Check for errors (if check_errors method is implemented)
+        # errors = chroma.check_errors()
+        # if 'No error' not in errors:
+        #     raise RuntimeError(f"Load error: {errors}")
 
+        # Turn on loads
+        chroma.output_on(channel_list=all_channels)
+
+        # Monitor
+        sleep(1.0)
+        measurements = {}
+        for channel in all_channels:
+            measurements[channel] = {
+                'voltage': chroma.measure_voltage(channel),
+                'current': chroma.measure_current(channel),
+                'power': chroma.measure_power(channel)
+            }
+
+        # Verify balanced operation
+        currents = [m['current'] for m in measurements.values()]
+        if max(currents) - min(currents) > current * 0.1:  # >10% imbalance
+            print("Warning: Current imbalance detected!")
+
+        return measurements
+
+    except pyvisa.errors.VisaIOError as e:
+        print(f"VISA communication error: {e}")
+        raise
     except Exception as e:
         print(f"Error occurred: {e}")
-        # Emergency shutdown
-        try:
-            system.turn_off_synchronized()
-        except:
-            pass
         raise
     finally:
-        # Always cleanup
-        system.turn_off_synchronized()
+        # Always turn off loads and cleanup
+        if chroma is not None:
+            try:
+                chroma.output_off(channel_list=all_channels)
+            except:
+                pass
+            try:
+                chroma.close()
+            except:
+                pass
+```
+
+**Best Practice: Use Context Manager**
+
+```python
+# With context manager support (see extension recommendations)
+with Chroma_63600_5('GPIB0::5::INSTR') as chroma:
+    chroma.parallel_init(on_off='ON', master_chan=1, slave_list=[3])
+    # Test code here...
+    # Automatically handles cleanup and turns off loads on exit
 ```
 
 ### 7. Calibration
@@ -1060,23 +1189,44 @@ Maintain records of:
 
 ## Conclusion
 
-The Chroma 63600 series electronic loads provide robust parallel operation capabilities through master/slave configuration. Key takeaways:
+The Chroma 63600 series electronic loads provide robust parallel operation capabilities through master/slave configuration. This report documents both the **current driver implementation** and alternative approaches for different use cases.
 
-1. **Master/Slave mode** is the recommended approach for parallel operation
-2. **Synchronization** is built into the hardware - configure properly and it works automatically
-3. **PyVISA** provides excellent control through standard SCPI commands
-4. **GitHub examples** demonstrate proven patterns for production use
-5. **Proper configuration** (hardware and software) is critical for reliable operation
+### Key Takeaways
 
-For `set_cc_current` synchronization, the workflow is:
+1. **Current Driver Architecture**: Uses single PyVISA connection for multi-channel control
+2. **Built-in Parallel Support**: `parallel_init()` method configures master/slave channels
+3. **Hardware Synchronization**: Internal firmware handles channel synchronization
+4. **Channel-Based Control**: All operations require channel selection before execution
+5. **SCPI Commands**: Uses `CHANNEL`, `CONFIGURE:PARALLEL:*`, `CURR:STAT:L2`, `LOAD ON/OFF`
 
-1. Configure one load as MASTER, one as SLAVE
-2. Initialize parallel mode on both
-3. Set current on both loads (or just master in smart mode)
-4. Turn on master (controls both in parallel mode)
-5. Monitor both loads to verify proper operation
+### Implementation Workflow (Current Driver)
 
-The provided code examples should give you a solid foundation for implementing parallel load control in your application.
+For `set_CC_current` with parallel operation using the current driver:
+
+1. **Initialize connection**: Create `Chroma_63600_5` instance with VISA address
+2. **Configure parallel mode**: Call `parallel_init(on_off='ON', master_chan=1, slave_list=[3])`
+3. **Set current on all channels**: Use `set_CC_current()` or `set_CC_current_multiple()`
+4. **Turn on channels**: Call `output_on(channel_list=[1, 3])`
+5. **Monitor channels**: Use `measure_voltage()`, `measure_current()`, `measure_power()`
+6. **Turn off channels**: Call `output_off(channel_list=[1, 3])`
+
+### Recommended Extensions
+
+To enhance the driver for production use:
+- Add automatic current range selection (`mode_sel_auto()`)
+- Implement error checking (`check_errors()`, `verify_parallel_config()`)
+- Add batch measurement capability (`measure_all()`)
+- Include context manager support (`__enter__`, `__exit__`)
+
+### Alternative Architectures
+
+For **multi-mainframe parallel operation** (separate instruments):
+- Requires multiple VISA connections
+- Master/slave configured on separate physical instruments
+- External synchronization (GPIB trigger or sequential commands)
+- See GitHub examples (Korrigan36/External-Ports) for reference implementation
+
+The current driver provides a solid foundation for single-mainframe multi-channel parallel operation, with clear extension points for enhanced functionality.
 
 ---
 
