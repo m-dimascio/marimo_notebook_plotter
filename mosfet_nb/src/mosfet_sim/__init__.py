@@ -31,6 +31,12 @@ from .plotting import (
     plot_device_cross_section,
     plot_band_diagram,
 )
+from .exporter import (
+    export_mesh_geometry,
+    export_concentration_frame,
+    export_animation_sequence,
+    export_complete_visualization,
+)
 
 __all__ = [
     # Constants
@@ -54,4 +60,7 @@ __all__ = [
     # 2D Plotting
     "plot_output_characteristics", "plot_transfer_characteristics",
     "plot_device_cross_section", "plot_band_diagram",
+    # Exporter
+    "export_mesh_geometry", "export_concentration_frame",
+    "export_animation_sequence", "export_complete_visualization",
 ]
