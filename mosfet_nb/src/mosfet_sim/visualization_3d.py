@@ -451,3 +451,255 @@ def create_cross_section_slice(
     )
 
     return fig
+
+
+def create_animated_cross_section(
+    mesh: DeviceMesh,
+    concentrations: list[CarrierConcentration],
+    parameter_values: np.ndarray,
+    parameter_name: str = 'Vgs',
+    parameter_unit: str = 'V',
+) -> go.Figure:
+    """
+    Create animated 2D cross-section heatmap with Plotly native animation.
+
+    This provides a reliable, pure-Python visualization using Plotly's
+    built-in animation support.
+
+    Args:
+        mesh: Device mesh
+        concentrations: List of CarrierConcentration for each frame
+        parameter_values: Array of parameter values (one per frame)
+        parameter_name: Name of swept parameter for labels
+        parameter_unit: Unit string for labels
+
+    Returns:
+        Plotly Figure with animation slider and play button
+    """
+    vth = threshold_voltage(mesh.params)
+    y_idx = len(mesh.y) // 2  # Center slice
+
+    # Compute z ranges for consistent colorscale across all frames
+    all_values = []
+    for conc in concentrations:
+        electrons_slice = conc.electrons[:, y_idx, :]
+        electrons_slice = np.maximum(electrons_slice, 1e1)
+        all_values.append(np.log10(electrons_slice))
+
+    zmin = min(v.min() for v in all_values)
+    zmax = max(v.max() for v in all_values)
+
+    # Create initial heatmap
+    initial_values = all_values[0]
+
+    fig = go.Figure(
+        data=[go.Heatmap(
+            x=mesh.x,
+            y=mesh.z,
+            z=initial_values.T,
+            colorscale='Viridis',
+            zmin=zmin,
+            zmax=zmax,
+            colorbar=dict(
+                title=dict(
+                    text='log₁₀(n)<br>[cm⁻³]',
+                    side='right',
+                ),
+            ),
+        )],
+    )
+
+    # Create animation frames
+    frames = []
+    for i, (values, param_val) in enumerate(zip(all_values, parameter_values)):
+        # Determine operating region
+        if parameter_name == 'Vgs':
+            if param_val < vth:
+                region = "CUTOFF"
+            elif param_val < vth + 0.5:
+                region = "NEAR THRESHOLD"
+            else:
+                region = "ACTIVE"
+        else:
+            vdsat = param_val  # Simplified
+            region = "LINEAR" if param_val < 1.0 else "SATURATION"
+
+        frame = go.Frame(
+            data=[go.Heatmap(
+                x=mesh.x,
+                y=mesh.z,
+                z=values.T,
+                colorscale='Viridis',
+                zmin=zmin,
+                zmax=zmax,
+            )],
+            name=f'{param_val:.2f}',
+            layout=go.Layout(
+                title=dict(
+                    text=f'MOSFET Cross-Section | {parameter_name}={param_val:.2f}{parameter_unit} | Vth={vth:.2f}V | <b>{region}</b>',
+                    font=dict(size=14),
+                )
+            )
+        )
+        frames.append(frame)
+
+    fig.frames = frames
+
+    # Add animation controls
+    fig.update_layout(
+        title=dict(
+            text=f'MOSFET Cross-Section | {parameter_name}={parameter_values[0]:.2f}{parameter_unit} | Vth={vth:.2f}V',
+            font=dict(size=14),
+        ),
+        xaxis_title='X (μm) - Channel Direction',
+        yaxis_title='Z (μm) - Depth',
+        yaxis=dict(scaleanchor='x', scaleratio=1),
+        updatemenus=[
+            dict(
+                type='buttons',
+                showactive=False,
+                y=0,
+                x=0.1,
+                xanchor='right',
+                yanchor='top',
+                buttons=[
+                    dict(
+                        label='▶ Play',
+                        method='animate',
+                        args=[
+                            None,
+                            dict(
+                                frame=dict(duration=150, redraw=True),
+                                fromcurrent=True,
+                                transition=dict(duration=50),
+                                mode='immediate',
+                            )
+                        ]
+                    ),
+                    dict(
+                        label='⏸ Pause',
+                        method='animate',
+                        args=[
+                            [None],
+                            dict(
+                                frame=dict(duration=0, redraw=False),
+                                mode='immediate',
+                                transition=dict(duration=0),
+                            )
+                        ]
+                    ),
+                ]
+            )
+        ],
+        sliders=[
+            dict(
+                active=0,
+                yanchor='top',
+                xanchor='left',
+                currentvalue=dict(
+                    font=dict(size=14),
+                    prefix=f'{parameter_name}: ',
+                    suffix=f' {parameter_unit}',
+                    visible=True,
+                    xanchor='right',
+                ),
+                transition=dict(duration=50),
+                pad=dict(b=10, t=50),
+                len=0.9,
+                x=0.1,
+                y=0,
+                steps=[
+                    dict(
+                        args=[
+                            [f'{val:.2f}'],
+                            dict(
+                                frame=dict(duration=150, redraw=True),
+                                mode='immediate',
+                                transition=dict(duration=50),
+                            )
+                        ],
+                        label=f'{val:.1f}',
+                        method='animate',
+                    )
+                    for val in parameter_values
+                ],
+            )
+        ],
+        margin=dict(l=60, r=30, t=60, b=60),
+    )
+
+    return fig
+
+
+def create_vgs_sweep_animation_2d(
+    params: MOSFETParams,
+    vgs_min: float = 0.0,
+    vgs_max: float = 3.0,
+    vds: float = 0.5,
+    n_frames: int = 30,
+    mesh_resolution: tuple[int, int, int] = (40, 15, 25),
+) -> go.Figure:
+    """
+    Create 2D animated cross-section sweeping gate voltage.
+
+    This is a more reliable alternative to the 3D isosurface animation.
+
+    Args:
+        params: MOSFET device parameters
+        vgs_min: Starting gate voltage
+        vgs_max: Ending gate voltage
+        vds: Fixed drain voltage
+        n_frames: Number of animation frames
+        mesh_resolution: (nx, ny, nz) mesh points
+
+    Returns:
+        Animated Plotly figure with 2D heatmap
+    """
+    from .mesh import create_device_mesh
+    from .concentration import generate_concentration_sweep
+
+    mesh = create_device_mesh(params, *mesh_resolution)
+    vgs_values = np.linspace(vgs_min, vgs_max, n_frames)
+    concentrations = generate_concentration_sweep(mesh, vgs_values, vds)
+
+    return create_animated_cross_section(
+        mesh, concentrations, vgs_values,
+        parameter_name='Vgs', parameter_unit='V'
+    )
+
+
+def create_vds_sweep_animation_2d(
+    params: MOSFETParams,
+    vgs: float = 2.0,
+    vds_min: float = 0.0,
+    vds_max: float = 3.0,
+    n_frames: int = 30,
+    mesh_resolution: tuple[int, int, int] = (40, 15, 25),
+) -> go.Figure:
+    """
+    Create 2D animated cross-section sweeping drain voltage.
+
+    Shows channel pinch-off as Vds increases.
+
+    Args:
+        params: MOSFET device parameters
+        vgs: Fixed gate voltage (should be > Vth)
+        vds_min: Starting drain voltage
+        vds_max: Ending drain voltage
+        n_frames: Number of animation frames
+        mesh_resolution: (nx, ny, nz) mesh points
+
+    Returns:
+        Animated Plotly figure with 2D heatmap
+    """
+    from .mesh import create_device_mesh
+    from .concentration import generate_output_sweep
+
+    mesh = create_device_mesh(params, *mesh_resolution)
+    vds_values = np.linspace(vds_min, vds_max, n_frames)
+    concentrations = generate_output_sweep(mesh, vgs, vds_values)
+
+    return create_animated_cross_section(
+        mesh, concentrations, vds_values,
+        parameter_name='Vds', parameter_unit='V'
+    )

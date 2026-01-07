@@ -24,6 +24,9 @@ from .visualization_3d import (
     create_vgs_sweep_animation,
     create_vds_sweep_animation,
     create_cross_section_slice,
+    create_animated_cross_section,
+    create_vgs_sweep_animation_2d,
+    create_vds_sweep_animation_2d,
 )
 from .plotting import (
     plot_output_characteristics,
@@ -57,6 +60,9 @@ __all__ = [
     # 3D Visualization
     "create_animated_figure", "create_vgs_sweep_animation",
     "create_vds_sweep_animation", "create_cross_section_slice",
+    # 2D Animated Visualization
+    "create_animated_cross_section", "create_vgs_sweep_animation_2d",
+    "create_vds_sweep_animation_2d",
     # 2D Plotting
     "plot_output_characteristics", "plot_transfer_characteristics",
     "plot_device_cross_section", "plot_band_diagram",
