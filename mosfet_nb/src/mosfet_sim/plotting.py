@@ -12,30 +12,45 @@ def plot_output_characteristics(
     vgs_values: list[float],
     vds_max: float = 5.0,
     num_points: int = 100,
+    show_regions: bool = True,
 ) -> Figure:
     """
-    Plot Id vs Vds for multiple Vgs values.
+    Plot Id vs Vds for multiple Vgs values with operating region indicators.
 
     Args:
         params: MOSFET device parameters
         vgs_values: List of gate voltages to plot
         vds_max: Maximum drain voltage
         num_points: Number of points per curve
+        show_regions: Show operating region shading
 
     Returns:
         Matplotlib Figure object
     """
     fig, ax = plt.subplots(figsize=(8, 5))
     vds = np.linspace(0, vds_max, num_points)
+    vth = threshold_voltage(params)
 
     for vgs in vgs_values:
         id_ma = drain_current(params, vgs, vds) * 1e3  # Convert to mA
-        ax.plot(vds, id_ma, label=f"Vgs = {vgs:.1f} V")
+        vdsat = max(vgs - vth, 0)
+
+        # Color based on whether above or below threshold
+        color = 'gray' if vgs < vth else None
+        linestyle = '--' if vgs < vth else '-'
+        label = f"Vgs={vgs:.1f}V" + (" (cutoff)" if vgs < vth else "")
+
+        ax.plot(vds, id_ma, label=label, linestyle=linestyle, color=color)
+
+        # Mark saturation point
+        if vgs > vth and vdsat < vds_max:
+            id_sat = drain_current(params, vgs, vdsat) * 1e3
+            ax.axvline(vdsat, color='lightgray', linestyle=':', alpha=0.5)
 
     ax.set_xlabel("Vds (V)")
     ax.set_ylabel("Id (mA)")
-    ax.set_title("MOSFET Output Characteristics")
-    ax.legend()
+    ax.set_title(f"Output Characteristics (Vth = {vth:.2f} V)")
+    ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0, vds_max)
     ax.set_ylim(bottom=0)

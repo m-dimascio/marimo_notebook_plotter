@@ -5,11 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "mosfet_sim"
 version = "0.1.0"
-description = "Interactive MOSFET device simulation"
+description = "Interactive 3D MOSFET device simulation with animation"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24.0",
+    "scipy>=1.10.0",
     "matplotlib>=3.7.0",
+    "plotly>=5.18.0",
     "marimo>=0.8.0",
 ]
 
