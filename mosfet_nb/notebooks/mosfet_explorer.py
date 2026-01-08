@@ -21,6 +21,11 @@ def _(mo):
         - **Animated sweeps** through all operating modes
         - **Play/pause controls** with slider for frame selection
 
+        ## Simulation Backends
+
+        - **Analytical (default)**: Fast, uses square-law model approximations
+        - **COMSOL (optional)**: Rigorous finite-element simulation with drift-diffusion physics
+
         ## Operating Modes Visualized
 
         | Mode | Condition | Channel |
@@ -52,9 +57,28 @@ def _():
         plot_output_characteristics,
         plot_transfer_characteristics,
     )
+
+    # Try to import COMSOL integration
+    try:
+        from mosfet_sim.comsol import MOSFETModel, is_comsol_available
+        from mosfet_sim.visualization_3d import (
+            create_comsol_animation_2d,
+            create_comsol_vgs_animation,
+            create_comsol_vds_animation,
+        )
+        COMSOL_AVAILABLE = is_comsol_available()
+    except ImportError:
+        COMSOL_AVAILABLE = False
+        MOSFETModel = None
+
     return (
+        COMSOL_AVAILABLE,
+        MOSFETModel,
         MOSFETParams,
         compute_biased_concentrations,
+        create_comsol_animation_2d,
+        create_comsol_vds_animation,
+        create_comsol_vgs_animation,
         create_cross_section_slice,
         create_device_mesh,
         create_vds_sweep_animation_2d,
@@ -142,6 +166,41 @@ def _(device, mo, oxide_capacitance, threshold_voltage):
 
 
 @app.cell
+def _(COMSOL_AVAILABLE, mo):
+    mo.md(
+        f"""
+        ## Simulation Backend
+
+        {'**COMSOL is available!** You can use rigorous finite-element simulation.' if COMSOL_AVAILABLE else '**COMSOL is not available.** Using analytical model (square-law approximation). To enable COMSOL, install MPh and ensure COMSOL Multiphysics with Semiconductor Module is licensed.'}
+        """
+    )
+    return
+
+
+@app.cell
+def _(COMSOL_AVAILABLE, mo):
+    # Simulation backend selection
+    if COMSOL_AVAILABLE:
+        use_comsol = mo.ui.checkbox(
+            value=False,
+            label="Use COMSOL Simulation (slower but more accurate)",
+        )
+        mesh_quality = mo.ui.dropdown(
+            options=["coarse", "normal", "fine"],
+            value="normal",
+            label="COMSOL Mesh Quality",
+        )
+        backend_controls = mo.hstack([use_comsol, mesh_quality])
+    else:
+        use_comsol = None
+        mesh_quality = None
+        backend_controls = mo.md("*Analytical model will be used*")
+
+    backend_controls
+    return backend_controls, mesh_quality, use_comsol
+
+
+@app.cell
 def _(mo):
     mo.md(
         """
@@ -225,48 +284,98 @@ def _(mo):
 
 
 @app.cell
-def _(mo):
-    mo.md("## Electron Concentration Animation")
+def _(mo, use_comsol):
+    if use_comsol is not None and use_comsol.value:
+        mo.md("## Electron Concentration Animation (COMSOL)")
+    else:
+        mo.md("## Electron Concentration Animation (Analytical)")
     return
 
 
 @app.cell
 def _(
+    MOSFETModel,
+    create_comsol_animation_2d,
     create_vds_sweep_animation_2d,
     create_vgs_sweep_animation_2d,
     device,
+    mesh_quality,
     mo,
     n_frames_slider,
     sweep_mode,
     sweep_params,
+    use_comsol,
 ):
-    # Generate animation using pure Python/Plotly
-    mo.output.append(
-        mo.md("Computing animation frames... (this may take a moment)")
-    )
+    # Generate animation based on selected backend
+    use_comsol_backend = use_comsol is not None and use_comsol.value
 
-    if sweep_mode.value == "vgs":
-        fig_animation = create_vgs_sweep_animation_2d(
-            params=device,
-            vgs_min=sweep_params["vgs_range"].value[0],
-            vgs_max=sweep_params["vgs_range"].value[1],
-            vds=sweep_params["vds_fixed"].value,
-            n_frames=n_frames_slider.value,
-            mesh_resolution=(50, 20, 30),
+    if use_comsol_backend:
+        mo.output.append(
+            mo.md("**Running COMSOL simulation...** (this may take several minutes)")
         )
+
+        # Create COMSOL model
+        model = MOSFETModel(
+            params=device,
+            mesh_refinement=mesh_quality.value if mesh_quality else "normal"
+        )
+
+        if sweep_mode.value == "vgs":
+            concentrations, param_values = model.sweep_vgs(
+                vgs_min=sweep_params["vgs_range"].value[0],
+                vgs_max=sweep_params["vgs_range"].value[1],
+                vds=sweep_params["vds_fixed"].value,
+                n_frames=n_frames_slider.value,
+                mesh_resolution=(50, 20, 30),
+            )
+            fig_animation = create_comsol_animation_2d(
+                concentrations, param_values, "Vgs", device
+            )
+        else:
+            concentrations, param_values = model.sweep_vds(
+                vgs=sweep_params["vgs_fixed"].value,
+                vds_min=sweep_params["vds_range"].value[0],
+                vds_max=sweep_params["vds_range"].value[1],
+                n_frames=n_frames_slider.value,
+                mesh_resolution=(50, 20, 30),
+            )
+            fig_animation = create_comsol_animation_2d(
+                concentrations, param_values, "Vds", device
+            )
     else:
-        fig_animation = create_vds_sweep_animation_2d(
-            params=device,
-            vgs=sweep_params["vgs_fixed"].value,
-            vds_min=sweep_params["vds_range"].value[0],
-            vds_max=sweep_params["vds_range"].value[1],
-            n_frames=n_frames_slider.value,
-            mesh_resolution=(50, 20, 30),
+        # Use analytical model
+        mo.output.append(
+            mo.md("Computing animation frames... (this may take a moment)")
         )
+
+        if sweep_mode.value == "vgs":
+            fig_animation = create_vgs_sweep_animation_2d(
+                params=device,
+                vgs_min=sweep_params["vgs_range"].value[0],
+                vgs_max=sweep_params["vgs_range"].value[1],
+                vds=sweep_params["vds_fixed"].value,
+                n_frames=n_frames_slider.value,
+                mesh_resolution=(50, 20, 30),
+            )
+        else:
+            fig_animation = create_vds_sweep_animation_2d(
+                params=device,
+                vgs=sweep_params["vgs_fixed"].value,
+                vds_min=sweep_params["vds_range"].value[0],
+                vds_max=sweep_params["vds_range"].value[1],
+                n_frames=n_frames_slider.value,
+                mesh_resolution=(50, 20, 30),
+            )
 
     mo.output.clear()
     fig_animation
-    return (fig_animation,)
+    return (
+        concentrations,
+        fig_animation,
+        model,
+        param_values,
+        use_comsol_backend,
+    )
 
 
 @app.cell
@@ -357,11 +466,36 @@ def _(
 
 
 @app.cell
-def _(mo):
-    mo.md(
-        """
+def _(mo, use_comsol):
+    if use_comsol is not None and use_comsol.value:
+        physics_notes = """
         ---
-        ## Physics Notes
+        ## Physics Notes (COMSOL Simulation)
+
+        ### Drift-Diffusion Model
+
+        COMSOL solves the coupled semiconductor equations:
+
+        1. **Poisson's equation**: ∇·(ε∇V) = -q(p - n + N_D - N_A)
+        2. **Electron continuity**: ∂n/∂t = (1/q)∇·J_n - R
+        3. **Hole continuity**: ∂p/∂t = -(1/q)∇·J_p - R
+
+        Where the current densities include both drift and diffusion:
+        - J_n = qμ_n·n·E + qD_n·∇n
+        - J_p = qμ_p·p·E - qD_p·∇p
+
+        ### Advantages over Analytical Model
+
+        - Self-consistent electrostatics
+        - Accurate junction physics
+        - Proper boundary conditions at contacts
+        - Can include advanced mobility models
+        - Density-gradient option for quantum effects
+        """
+    else:
+        physics_notes = """
+        ---
+        ## Physics Notes (Analytical Model)
 
         ### Square-Law Model Assumptions
 
@@ -389,9 +523,12 @@ def _(mo):
         - Simplified band bending model
         - No quantum confinement
         - Uniform doping profiles
+
+        **Tip:** Enable COMSOL simulation for more accurate physics!
         """
-    )
-    return
+
+    mo.md(physics_notes)
+    return (physics_notes,)
 
 
 if __name__ == "__main__":

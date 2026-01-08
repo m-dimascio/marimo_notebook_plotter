@@ -1,4 +1,22 @@
-"""MOSFET Simulation Package with 3D Visualization."""
+"""MOSFET Simulation Package with 3D Visualization.
+
+This package provides:
+- Analytical MOSFET physics models (square-law approximation)
+- 3D mesh generation and carrier concentration computation
+- Animated Plotly visualizations
+- Optional COMSOL integration for rigorous FEM simulation
+
+COMSOL Integration:
+    The optional `comsol` subpackage provides a Python interface to
+    COMSOL Multiphysics for drift-diffusion semiconductor simulation.
+    Requires: COMSOL with Semiconductor Module + MPh library.
+
+    >>> from mosfet_sim.comsol import MOSFETModel, is_comsol_available
+    >>> if is_comsol_available():
+    ...     model = MOSFETModel(params)
+    ...     model.build()
+    ...     conc = model.solve_single(vgs=1.5, vds=0.5)
+"""
 
 from .constants import Q, K_B, EPS_0, thermal_voltage
 from .materials import Semiconductor, Insulator, SILICON, SIO2
@@ -27,6 +45,11 @@ from .visualization_3d import (
     create_animated_cross_section,
     create_vgs_sweep_animation_2d,
     create_vds_sweep_animation_2d,
+    # COMSOL integration adapters
+    comsol_to_carrier_concentration,
+    create_comsol_animation_2d,
+    create_comsol_vgs_animation,
+    create_comsol_vds_animation,
 )
 from .plotting import (
     plot_output_characteristics,
@@ -63,6 +86,9 @@ __all__ = [
     # 2D Animated Visualization
     "create_animated_cross_section", "create_vgs_sweep_animation_2d",
     "create_vds_sweep_animation_2d",
+    # COMSOL Integration Adapters
+    "comsol_to_carrier_concentration", "create_comsol_animation_2d",
+    "create_comsol_vgs_animation", "create_comsol_vds_animation",
     # 2D Plotting
     "plot_output_characteristics", "plot_transfer_characteristics",
     "plot_device_cross_section", "plot_band_diagram",

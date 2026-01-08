@@ -703,3 +703,245 @@ def create_vds_sweep_animation_2d(
         mesh, concentrations, vds_values,
         parameter_name='Vds', parameter_unit='V'
     )
+
+
+# =============================================================================
+# COMSOL INTEGRATION ADAPTERS
+# =============================================================================
+
+def comsol_to_carrier_concentration(
+    comsol_conc,  # COMSOLConcentration from comsol.extract
+    params: MOSFETParams
+):
+    """
+    Convert COMSOL concentration data to existing CarrierConcentration format.
+
+    This adapter allows reuse of existing visualization code with
+    COMSOL simulation results.
+
+    Args:
+        comsol_conc: COMSOLConcentration from comsol.extract module.
+        params: MOSFET device parameters.
+
+    Returns:
+        CarrierConcentration object compatible with existing visualization.
+    """
+    from .mesh import DeviceMesh, Region
+
+    # Create meshgrid from COMSOL coordinates
+    X, Y, Z = np.meshgrid(
+        comsol_conc.x,
+        comsol_conc.y,
+        comsol_conc.z,
+        indexing='ij'
+    )
+
+    # Create placeholder regions array (simplified - all body)
+    regions = np.zeros_like(comsol_conc.electrons, dtype=np.int8)
+
+    # Tag regions based on position (approximate)
+    L = params.channel_length
+    sd_ext = 0.4 * L
+    tox = params.oxide_thickness
+
+    for i, x in enumerate(comsol_conc.x):
+        for k, z in enumerate(comsol_conc.z):
+            if z > 0:
+                # Above surface - oxide/gate
+                if sd_ext < x < sd_ext + L:
+                    regions[i, :, k] = Region.GATE.value
+                else:
+                    regions[i, :, k] = Region.OXIDE.value
+            elif x < sd_ext:
+                # Source region
+                regions[i, :, k] = Region.SOURCE.value
+            elif x > sd_ext + L:
+                # Drain region
+                regions[i, :, k] = Region.DRAIN.value
+            elif z > -0.05 * L:
+                # Channel (thin surface layer)
+                regions[i, :, k] = Region.CHANNEL.value
+            else:
+                # Body
+                regions[i, :, k] = Region.BODY.value
+
+    mesh = DeviceMesh(
+        x=comsol_conc.x,
+        y=comsol_conc.y,
+        z=comsol_conc.z,
+        X=X,
+        Y=Y,
+        Z=Z,
+        regions=regions,
+        params=params
+    )
+
+    # Fixed charge from doping (simplified - uniform)
+    fixed_charge = np.zeros_like(comsol_conc.electrons)
+
+    return CarrierConcentration(
+        mesh=mesh,
+        electrons=comsol_conc.electrons,
+        holes=comsol_conc.holes,
+        fixed_charge=fixed_charge
+    )
+
+
+def create_comsol_animation_2d(
+    comsol_concentrations: list,  # List[COMSOLConcentration]
+    parameter_values: np.ndarray,
+    parameter_name: str,
+    params: MOSFETParams
+) -> go.Figure:
+    """
+    Create animation from COMSOL results using existing visualization.
+
+    This function converts COMSOL concentration data to the format
+    expected by the existing animation functions, then creates
+    the animated figure.
+
+    Args:
+        comsol_concentrations: List of COMSOLConcentration objects.
+        parameter_values: Array of parameter values (e.g., Vgs values).
+        parameter_name: Name of the swept parameter ("Vgs" or "Vds").
+        params: MOSFET device parameters.
+
+    Returns:
+        Animated Plotly figure with 2D heatmap.
+
+    Example:
+        >>> from mosfet_sim.comsol import MOSFETModel
+        >>> model = MOSFETModel(params)
+        >>> concentrations, vgs_values = model.sweep_vgs(0, 3, 0.5)
+        >>> fig = create_comsol_animation_2d(
+        ...     concentrations, vgs_values, "Vgs", params
+        ... )
+    """
+    # Convert COMSOL data to existing format
+    carrier_concentrations = [
+        comsol_to_carrier_concentration(c, params)
+        for c in comsol_concentrations
+    ]
+
+    # Get mesh from first concentration
+    mesh = carrier_concentrations[0].mesh
+
+    # Use existing animation function
+    return create_animated_cross_section(
+        mesh=mesh,
+        concentrations=carrier_concentrations,
+        parameter_values=parameter_values,
+        parameter_name=parameter_name,
+        parameter_unit='V'
+    )
+
+
+def create_comsol_vgs_animation(
+    params: MOSFETParams,
+    vgs_min: float = 0.0,
+    vgs_max: float = 3.0,
+    vds: float = 0.5,
+    n_frames: int = 30,
+    mesh_refinement: str = "normal",
+    mesh_resolution: tuple = (50, 20, 30)
+) -> go.Figure:
+    """
+    Create Vgs sweep animation using COMSOL simulation.
+
+    This is the COMSOL equivalent of create_vgs_sweep_animation_2d.
+    It uses rigorous finite-element simulation instead of analytical
+    approximations.
+
+    Args:
+        params: MOSFET device parameters.
+        vgs_min: Starting gate voltage [V].
+        vgs_max: Ending gate voltage [V].
+        vds: Fixed drain voltage [V].
+        n_frames: Number of animation frames.
+        mesh_refinement: COMSOL mesh quality ("coarse", "normal", "fine").
+        mesh_resolution: (nx, ny, nz) for result extraction.
+
+    Returns:
+        Animated Plotly figure with 2D heatmap.
+
+    Raises:
+        RuntimeError: If COMSOL is not available.
+    """
+    # Import here to avoid circular imports and allow graceful failure
+    try:
+        from .comsol import MOSFETModel
+    except ImportError as e:
+        raise RuntimeError(
+            f"COMSOL integration not available: {e}. "
+            "Use create_vgs_sweep_animation_2d() for analytical simulation."
+        )
+
+    # Create and run COMSOL simulation
+    model = MOSFETModel(params, mesh_refinement=mesh_refinement)
+    concentrations, vgs_values = model.sweep_vgs(
+        vgs_min=vgs_min,
+        vgs_max=vgs_max,
+        vds=vds,
+        n_frames=n_frames,
+        mesh_resolution=mesh_resolution
+    )
+
+    # Create animation
+    return create_comsol_animation_2d(
+        concentrations, vgs_values, "Vgs", params
+    )
+
+
+def create_comsol_vds_animation(
+    params: MOSFETParams,
+    vgs: float = 2.0,
+    vds_min: float = 0.0,
+    vds_max: float = 3.0,
+    n_frames: int = 30,
+    mesh_refinement: str = "normal",
+    mesh_resolution: tuple = (50, 20, 30)
+) -> go.Figure:
+    """
+    Create Vds sweep animation using COMSOL simulation.
+
+    This is the COMSOL equivalent of create_vds_sweep_animation_2d.
+    It uses rigorous finite-element simulation instead of analytical
+    approximations.
+
+    Args:
+        params: MOSFET device parameters.
+        vgs: Fixed gate voltage [V] (should be > Vth).
+        vds_min: Starting drain voltage [V].
+        vds_max: Ending drain voltage [V].
+        n_frames: Number of animation frames.
+        mesh_refinement: COMSOL mesh quality ("coarse", "normal", "fine").
+        mesh_resolution: (nx, ny, nz) for result extraction.
+
+    Returns:
+        Animated Plotly figure with 2D heatmap.
+
+    Raises:
+        RuntimeError: If COMSOL is not available.
+    """
+    try:
+        from .comsol import MOSFETModel
+    except ImportError as e:
+        raise RuntimeError(
+            f"COMSOL integration not available: {e}. "
+            "Use create_vds_sweep_animation_2d() for analytical simulation."
+        )
+
+    # Create and run COMSOL simulation
+    model = MOSFETModel(params, mesh_refinement=mesh_refinement)
+    concentrations, vds_values = model.sweep_vds(
+        vgs=vgs,
+        vds_min=vds_min,
+        vds_max=vds_max,
+        n_frames=n_frames,
+        mesh_resolution=mesh_resolution
+    )
+
+    # Create animation
+    return create_comsol_animation_2d(
+        concentrations, vds_values, "Vds", params
+    )
