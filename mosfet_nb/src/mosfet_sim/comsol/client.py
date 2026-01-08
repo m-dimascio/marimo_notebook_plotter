@@ -30,6 +30,10 @@ def is_comsol_available() -> bool:
     """
     Check if COMSOL/MPh is available.
 
+    This function verifies:
+    1. MPh library is installed
+    2. COMSOL Multiphysics is installed and discoverable
+
     Returns:
         True if MPh can be imported and COMSOL is accessible.
     """
@@ -40,12 +44,18 @@ def is_comsol_available() -> bool:
 
     try:
         import mph
-        # Try to discover COMSOL installation
-        mph.option("classkit", False)
+        # Actually verify COMSOL installation by checking discovery
+        from mph import discovery
+        # This will raise RuntimeError if COMSOL not found
+        backend = discovery.backend()
         _mph_available = True
-        logger.info("COMSOL/MPh is available")
+        logger.info(f"COMSOL available: {backend['name']} {backend['version']}")
     except ImportError:
         logger.warning("MPh library not installed. Install with: pip install MPh==1.3.1")
+        _mph_available = False
+    except RuntimeError as e:
+        # COMSOL not installed or not found
+        logger.warning(f"COMSOL not found: {e}")
         _mph_available = False
     except Exception as e:
         logger.warning(f"COMSOL not accessible: {e}")
