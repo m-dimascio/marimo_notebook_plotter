@@ -56,6 +56,10 @@ def _():
         create_cross_section_slice,
         plot_output_characteristics,
         plot_transfer_characteristics,
+        # Fluid-dynamics style visualization
+        create_vgs_sweep_fluid_animation,
+        create_vds_sweep_fluid_animation,
+        create_dual_view_animation,
     )
 
     # Try to import COMSOL integration
@@ -81,8 +85,11 @@ def _():
         create_comsol_vgs_animation,
         create_cross_section_slice,
         create_device_mesh,
+        create_dual_view_animation,
         create_vds_sweep_animation_2d,
+        create_vds_sweep_fluid_animation,
         create_vgs_sweep_animation_2d,
+        create_vgs_sweep_fluid_animation,
         drain_current,
         np,
         oxide_capacitance,
@@ -272,6 +279,36 @@ def _(mo, sweep_mode, vth):
 
 @app.cell
 def _(mo):
+    mo.md(
+        """
+        ## Visualization Style
+
+        Choose the rendering style for the animation:
+        - **Standard**: Basic heatmap with clear color mapping
+        - **Fluid Style**: Smooth gradients with contour overlays (CFD-like appearance)
+        - **Dual View**: Side-by-side concentration and current flow visualization
+        """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    viz_style = mo.ui.radio(
+        options={
+            "standard": "Standard Heatmap",
+            "fluid": "Fluid Style (smooth gradients + contours)",
+            "dual": "Dual View (concentration + current)",
+        },
+        value="fluid",
+        label="Visualization Style",
+    )
+    viz_style
+    return (viz_style,)
+
+
+@app.cell
+def _(mo):
     n_frames_slider = mo.ui.slider(
         start=10,
         stop=60,
@@ -296,8 +333,11 @@ def _(mo, use_comsol):
 def _(
     MOSFETModel,
     create_comsol_animation_2d,
+    create_dual_view_animation,
     create_vds_sweep_animation_2d,
+    create_vds_sweep_fluid_animation,
     create_vgs_sweep_animation_2d,
+    create_vgs_sweep_fluid_animation,
     device,
     mesh_quality,
     mo,
@@ -305,9 +345,11 @@ def _(
     sweep_mode,
     sweep_params,
     use_comsol,
+    viz_style,
 ):
-    # Generate animation based on selected backend
+    # Generate animation based on selected backend and visualization style
     use_comsol_backend = use_comsol is not None and use_comsol.value
+    selected_style = viz_style.value
 
     if use_comsol_backend:
         mo.output.append(
@@ -343,37 +385,75 @@ def _(
                 concentrations, param_values, "Vds", device
             )
     else:
-        # Use analytical model
+        # Use analytical model with selected visualization style
         mo.output.append(
             mo.md("Computing animation frames... (this may take a moment)")
         )
 
-        if sweep_mode.value == "vgs":
-            fig_animation = create_vgs_sweep_animation_2d(
+        # Common parameters for all styles
+        mesh_res = (50, 20, 30)
+        n_frames = n_frames_slider.value
+
+        if selected_style == "dual":
+            # Dual view only supports Vgs sweep currently
+            fig_animation = create_dual_view_animation(
                 params=device,
-                vgs_min=sweep_params["vgs_range"].value[0],
-                vgs_max=sweep_params["vgs_range"].value[1],
-                vds=sweep_params["vds_fixed"].value,
-                n_frames=n_frames_slider.value,
-                mesh_resolution=(50, 20, 30),
+                vgs_min=sweep_params["vgs_range"].value[0] if sweep_mode.value == "vgs" else 0.0,
+                vgs_max=sweep_params["vgs_range"].value[1] if sweep_mode.value == "vgs" else 3.0,
+                vds=sweep_params["vds_fixed"].value if sweep_mode.value == "vgs" else sweep_params["vgs_fixed"].value - 0.5,
+                n_frames=n_frames,
+                mesh_resolution=mesh_res,
             )
+        elif selected_style == "fluid":
+            # Fluid-dynamics style with smooth gradients
+            if sweep_mode.value == "vgs":
+                fig_animation = create_vgs_sweep_fluid_animation(
+                    params=device,
+                    vgs_min=sweep_params["vgs_range"].value[0],
+                    vgs_max=sweep_params["vgs_range"].value[1],
+                    vds=sweep_params["vds_fixed"].value,
+                    n_frames=n_frames,
+                    mesh_resolution=mesh_res,
+                    smooth_sigma=0.8,
+                    show_contours=True,
+                )
+            else:
+                fig_animation = create_vds_sweep_fluid_animation(
+                    params=device,
+                    vgs=sweep_params["vgs_fixed"].value,
+                    vds_min=sweep_params["vds_range"].value[0],
+                    vds_max=sweep_params["vds_range"].value[1],
+                    n_frames=n_frames,
+                    mesh_resolution=mesh_res,
+                    smooth_sigma=0.8,
+                    show_contours=True,
+                )
         else:
-            fig_animation = create_vds_sweep_animation_2d(
-                params=device,
-                vgs=sweep_params["vgs_fixed"].value,
-                vds_min=sweep_params["vds_range"].value[0],
-                vds_max=sweep_params["vds_range"].value[1],
-                n_frames=n_frames_slider.value,
-                mesh_resolution=(50, 20, 30),
-            )
+            # Standard visualization
+            if sweep_mode.value == "vgs":
+                fig_animation = create_vgs_sweep_animation_2d(
+                    params=device,
+                    vgs_min=sweep_params["vgs_range"].value[0],
+                    vgs_max=sweep_params["vgs_range"].value[1],
+                    vds=sweep_params["vds_fixed"].value,
+                    n_frames=n_frames,
+                    mesh_resolution=mesh_res,
+                )
+            else:
+                fig_animation = create_vds_sweep_animation_2d(
+                    params=device,
+                    vgs=sweep_params["vgs_fixed"].value,
+                    vds_min=sweep_params["vds_range"].value[0],
+                    vds_max=sweep_params["vds_range"].value[1],
+                    n_frames=n_frames,
+                    mesh_resolution=mesh_res,
+                )
 
     mo.output.clear()
     fig_animation
     return (
-        concentrations,
         fig_animation,
-        model,
-        param_values,
+        selected_style,
         use_comsol_backend,
     )
 
