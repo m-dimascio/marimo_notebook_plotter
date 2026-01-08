@@ -1,7 +1,18 @@
-"""3D visualization with animation using Plotly."""
+"""3D visualization with animation using Plotly.
+
+This module provides fluid-dynamics-style 2D slice animations for
+MOSFET carrier concentration visualization. The approach uses:
+- Plotly's native animation support (well-maintained, 79k+ stars)
+- Smooth gradient interpolation for fluid-like concentration display
+- Contour overlays for clear concentration boundaries
+- Optional current flow streamlines
+"""
 
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from scipy import ndimage
+from scipy.interpolate import RegularGridInterpolator
 from .mesh import DeviceMesh, Region
 from .concentration import CarrierConcentration
 from .device import MOSFETParams
@@ -703,6 +714,590 @@ def create_vds_sweep_animation_2d(
         mesh, concentrations, vds_values,
         parameter_name='Vds', parameter_unit='V'
     )
+
+
+# =============================================================================
+# ENHANCED FLUID-DYNAMICS STYLE VISUALIZATION
+# =============================================================================
+
+def smooth_concentration_field(
+    data: np.ndarray,
+    sigma: float = 1.0,
+    upscale_factor: int = 2
+) -> np.ndarray:
+    """
+    Apply Gaussian smoothing and upscaling for fluid-like gradients.
+
+    This creates smoother transitions between concentration values,
+    similar to what you'd see in CFD visualizations.
+
+    Args:
+        data: 2D concentration data (log-scaled recommended)
+        sigma: Gaussian kernel sigma for smoothing
+        upscale_factor: Factor to upscale resolution (2 = 2x in each dim)
+
+    Returns:
+        Smoothed and upscaled 2D array
+    """
+    # Apply Gaussian filter for smooth gradients
+    smoothed = ndimage.gaussian_filter(data, sigma=sigma)
+
+    if upscale_factor > 1:
+        # Upscale using zoom for finer resolution
+        smoothed = ndimage.zoom(smoothed, upscale_factor, order=3)
+
+    return smoothed
+
+
+def compute_current_flow_field(
+    conc: CarrierConcentration,
+    vds: float,
+    y_idx: int = None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute approximate current flow field for visualization.
+
+    Uses drift-diffusion approximation to estimate current density
+    directions. Useful for adding streamline-like arrows.
+
+    Args:
+        conc: Carrier concentration data
+        vds: Applied drain-source voltage
+        y_idx: Y-slice index (default: center)
+
+    Returns:
+        Tuple of (X, Z, Jx, Jz) - positions and current components
+    """
+    mesh = conc.mesh
+    if y_idx is None:
+        y_idx = len(mesh.y) // 2
+
+    electrons = conc.electrons[:, y_idx, :]
+
+    # Electric field from applied voltage (simplified: linear in channel)
+    L = mesh.params.channel_length * 1e6  # um
+    sd_ext = L * 0.4
+
+    # Current density proportional to n * E
+    # J = -q * n * mu * E (drift) for electrons
+    # E_x approximately -dV/dx = -Vds/L in channel
+
+    nx, nz = electrons.shape
+    Jx = np.zeros((nx, nz))
+    Jz = np.zeros((nx, nz))
+
+    for i in range(nx):
+        x = mesh.x[i]
+        # In channel region
+        if sd_ext < x < sd_ext + L:
+            # Drift current toward drain (positive x)
+            Jx[i, :] = electrons[i, :] * vds / L
+
+    # Normalize for visualization
+    J_mag = np.sqrt(Jx**2 + Jz**2)
+    max_J = np.max(J_mag)
+    if max_J > 0:
+        Jx = Jx / max_J
+        Jz = Jz / max_J
+
+    X, Z = np.meshgrid(mesh.x, mesh.z, indexing='ij')
+    return X, Z, Jx, Jz
+
+
+def create_fluid_animation_2d(
+    mesh: DeviceMesh,
+    concentrations: list[CarrierConcentration],
+    parameter_values: np.ndarray,
+    parameter_name: str = 'Vgs',
+    parameter_unit: str = 'V',
+    smooth_sigma: float = 0.8,
+    upscale: int = 2,
+    show_contours: bool = True,
+    contour_levels: int = 8,
+    colorscale: str = 'Viridis',
+) -> go.Figure:
+    """
+    Create fluid-dynamics style 2D animated cross-section.
+
+    This enhanced visualization provides:
+    - Gaussian-smoothed concentration gradients for fluid-like appearance
+    - Optional contour overlays showing concentration boundaries
+    - Improved colorscale with perceptually-uniform gradients
+
+    Args:
+        mesh: Device mesh
+        concentrations: List of CarrierConcentration for each frame
+        parameter_values: Array of parameter values (one per frame)
+        parameter_name: Name of swept parameter for labels
+        parameter_unit: Unit string for labels
+        smooth_sigma: Gaussian smoothing sigma (0 = no smoothing)
+        upscale: Resolution upscale factor (1 = original)
+        show_contours: Whether to overlay contour lines
+        contour_levels: Number of contour levels to show
+        colorscale: Plotly colorscale name
+
+    Returns:
+        Plotly Figure with fluid-style animation
+    """
+    vth = threshold_voltage(mesh.params)
+    y_idx = len(mesh.y) // 2
+
+    # Process all frames
+    all_values = []
+    x_coords = mesh.x
+    z_coords = mesh.z
+
+    for conc in concentrations:
+        electrons_slice = conc.electrons[:, y_idx, :]
+        electrons_slice = np.maximum(electrons_slice, 1e1)
+        log_values = np.log10(electrons_slice)
+
+        # Apply smoothing for fluid-like appearance
+        if smooth_sigma > 0 or upscale > 1:
+            smoothed = smooth_concentration_field(
+                log_values,
+                sigma=smooth_sigma,
+                upscale_factor=upscale
+            )
+            all_values.append(smoothed)
+        else:
+            all_values.append(log_values)
+
+    # Update coordinates if upscaled
+    if upscale > 1:
+        x_coords = np.linspace(mesh.x[0], mesh.x[-1], all_values[0].shape[0])
+        z_coords = np.linspace(mesh.z[0], mesh.z[-1], all_values[0].shape[1])
+
+    # Consistent colorscale range
+    zmin = min(v.min() for v in all_values)
+    zmax = max(v.max() for v in all_values)
+
+    # Create figure with heatmap
+    initial_values = all_values[0]
+
+    fig = go.Figure()
+
+    # Add heatmap trace
+    fig.add_trace(go.Heatmap(
+        x=x_coords,
+        y=z_coords,
+        z=initial_values.T,
+        colorscale=colorscale,
+        zmin=zmin,
+        zmax=zmax,
+        colorbar=dict(
+            title=dict(
+                text='log₁₀(n)<br>[cm⁻³]',
+                side='right',
+            ),
+            thickness=15,
+        ),
+        hovertemplate='X: %{x:.2f} μm<br>Z: %{y:.3f} μm<br>log₁₀(n): %{z:.1f}<extra></extra>',
+    ))
+
+    # Add contour overlay if requested
+    if show_contours:
+        contour_values = np.linspace(zmin + 0.5, zmax - 0.5, contour_levels)
+        fig.add_trace(go.Contour(
+            x=x_coords,
+            y=z_coords,
+            z=initial_values.T,
+            contours=dict(
+                start=contour_values[0],
+                end=contour_values[-1],
+                size=(contour_values[-1] - contour_values[0]) / contour_levels,
+                coloring='none',
+                showlines=True,
+            ),
+            line=dict(width=0.5, color='rgba(255,255,255,0.4)'),
+            showscale=False,
+            hoverinfo='skip',
+        ))
+
+    # Create animation frames
+    frames = []
+    for i, (values, param_val) in enumerate(zip(all_values, parameter_values)):
+        # Determine operating region
+        if parameter_name == 'Vgs':
+            if param_val < vth:
+                region = "CUTOFF"
+                region_color = "#EF4444"  # Red
+            elif param_val < vth + 0.5:
+                region = "SUBTHRESHOLD"
+                region_color = "#F59E0B"  # Amber
+            else:
+                region = "INVERSION"
+                region_color = "#10B981"  # Green
+        else:
+            vdsat = parameter_values[0] - vth if parameter_name == 'Vds' else 1.0
+            if param_val < vdsat:
+                region = "LINEAR"
+                region_color = "#10B981"
+            else:
+                region = "SATURATION"
+                region_color = "#3B82F6"  # Blue
+
+        # Frame data - update both heatmap and contour
+        frame_data = [go.Heatmap(
+            x=x_coords,
+            y=z_coords,
+            z=values.T,
+            colorscale=colorscale,
+            zmin=zmin,
+            zmax=zmax,
+        )]
+
+        if show_contours:
+            contour_values = np.linspace(zmin + 0.5, zmax - 0.5, contour_levels)
+            frame_data.append(go.Contour(
+                x=x_coords,
+                y=z_coords,
+                z=values.T,
+                contours=dict(
+                    start=contour_values[0],
+                    end=contour_values[-1],
+                    size=(contour_values[-1] - contour_values[0]) / contour_levels,
+                    coloring='none',
+                    showlines=True,
+                ),
+                line=dict(width=0.5, color='rgba(255,255,255,0.4)'),
+                showscale=False,
+            ))
+
+        frame = go.Frame(
+            data=frame_data,
+            name=f'{param_val:.2f}',
+            layout=go.Layout(
+                title=dict(
+                    text=(
+                        f'<b>MOSFET Cross-Section</b> | '
+                        f'{parameter_name}={param_val:.2f}{parameter_unit} | '
+                        f'V<sub>th</sub>={vth:.2f}V | '
+                        f'<span style="color:{region_color}"><b>{region}</b></span>'
+                    ),
+                    font=dict(size=14),
+                )
+            )
+        )
+        frames.append(frame)
+
+    fig.frames = frames
+
+    # Layout with animation controls
+    fig.update_layout(
+        title=dict(
+            text=(
+                f'<b>MOSFET Cross-Section</b> | '
+                f'{parameter_name}={parameter_values[0]:.2f}{parameter_unit} | '
+                f'V<sub>th</sub>={vth:.2f}V'
+            ),
+            font=dict(size=14),
+        ),
+        xaxis_title='X (μm) - Source → Drain',
+        yaxis_title='Z (μm) - Depth',
+        yaxis=dict(scaleanchor='x', scaleratio=1),
+        updatemenus=[
+            dict(
+                type='buttons',
+                showactive=False,
+                y=0,
+                x=0.1,
+                xanchor='right',
+                yanchor='top',
+                buttons=[
+                    dict(
+                        label='▶ Play',
+                        method='animate',
+                        args=[
+                            None,
+                            dict(
+                                frame=dict(duration=120, redraw=True),
+                                fromcurrent=True,
+                                transition=dict(duration=80, easing='cubic-in-out'),
+                                mode='immediate',
+                            )
+                        ]
+                    ),
+                    dict(
+                        label='⏸ Pause',
+                        method='animate',
+                        args=[
+                            [None],
+                            dict(
+                                frame=dict(duration=0, redraw=False),
+                                mode='immediate',
+                                transition=dict(duration=0),
+                            )
+                        ]
+                    ),
+                ]
+            )
+        ],
+        sliders=[
+            dict(
+                active=0,
+                yanchor='top',
+                xanchor='left',
+                currentvalue=dict(
+                    font=dict(size=14),
+                    prefix=f'{parameter_name}: ',
+                    suffix=f' {parameter_unit}',
+                    visible=True,
+                    xanchor='right',
+                ),
+                transition=dict(duration=80, easing='cubic-in-out'),
+                pad=dict(b=10, t=50),
+                len=0.9,
+                x=0.1,
+                y=0,
+                steps=[
+                    dict(
+                        args=[
+                            [f'{val:.2f}'],
+                            dict(
+                                frame=dict(duration=120, redraw=True),
+                                mode='immediate',
+                                transition=dict(duration=80, easing='cubic-in-out'),
+                            )
+                        ],
+                        label=f'{val:.1f}',
+                        method='animate',
+                    )
+                    for val in parameter_values
+                ],
+            )
+        ],
+        margin=dict(l=60, r=30, t=60, b=60),
+    )
+
+    return fig
+
+
+def create_vgs_sweep_fluid_animation(
+    params: MOSFETParams,
+    vgs_min: float = 0.0,
+    vgs_max: float = 3.0,
+    vds: float = 0.5,
+    n_frames: int = 30,
+    mesh_resolution: tuple[int, int, int] = (50, 15, 30),
+    smooth_sigma: float = 0.8,
+    show_contours: bool = True,
+) -> go.Figure:
+    """
+    Create fluid-style Vgs sweep animation with smooth gradients.
+
+    This is the enhanced version of create_vgs_sweep_animation_2d
+    with fluid-dynamics-style visualization.
+
+    Args:
+        params: MOSFET device parameters
+        vgs_min: Starting gate voltage
+        vgs_max: Ending gate voltage
+        vds: Fixed drain voltage
+        n_frames: Number of animation frames
+        mesh_resolution: (nx, ny, nz) mesh points
+        smooth_sigma: Gaussian smoothing sigma
+        show_contours: Whether to show contour overlays
+
+    Returns:
+        Animated Plotly figure with fluid-style visualization
+    """
+    from .mesh import create_device_mesh
+    from .concentration import generate_concentration_sweep
+
+    mesh = create_device_mesh(params, *mesh_resolution)
+    vgs_values = np.linspace(vgs_min, vgs_max, n_frames)
+    concentrations = generate_concentration_sweep(mesh, vgs_values, vds)
+
+    return create_fluid_animation_2d(
+        mesh, concentrations, vgs_values,
+        parameter_name='Vgs', parameter_unit='V',
+        smooth_sigma=smooth_sigma,
+        show_contours=show_contours,
+    )
+
+
+def create_vds_sweep_fluid_animation(
+    params: MOSFETParams,
+    vgs: float = 2.0,
+    vds_min: float = 0.0,
+    vds_max: float = 3.0,
+    n_frames: int = 30,
+    mesh_resolution: tuple[int, int, int] = (50, 15, 30),
+    smooth_sigma: float = 0.8,
+    show_contours: bool = True,
+) -> go.Figure:
+    """
+    Create fluid-style Vds sweep animation with smooth gradients.
+
+    Shows channel pinch-off with smooth, fluid-like transitions.
+
+    Args:
+        params: MOSFET device parameters
+        vgs: Fixed gate voltage (should be > Vth)
+        vds_min: Starting drain voltage
+        vds_max: Ending drain voltage
+        n_frames: Number of animation frames
+        mesh_resolution: (nx, ny, nz) mesh points
+        smooth_sigma: Gaussian smoothing sigma
+        show_contours: Whether to show contour overlays
+
+    Returns:
+        Animated Plotly figure with fluid-style visualization
+    """
+    from .mesh import create_device_mesh
+    from .concentration import generate_output_sweep
+
+    mesh = create_device_mesh(params, *mesh_resolution)
+    vds_values = np.linspace(vds_min, vds_max, n_frames)
+    concentrations = generate_output_sweep(mesh, vgs, vds_values)
+
+    return create_fluid_animation_2d(
+        mesh, concentrations, vds_values,
+        parameter_name='Vds', parameter_unit='V',
+        smooth_sigma=smooth_sigma,
+        show_contours=show_contours,
+    )
+
+
+def create_dual_view_animation(
+    params: MOSFETParams,
+    vgs_min: float = 0.0,
+    vgs_max: float = 3.0,
+    vds: float = 0.5,
+    n_frames: int = 30,
+    mesh_resolution: tuple[int, int, int] = (50, 15, 30),
+) -> go.Figure:
+    """
+    Create side-by-side animation with concentration and current flow.
+
+    Shows both the electron concentration and the current density
+    in a dual-panel view for comprehensive device understanding.
+
+    Args:
+        params: MOSFET device parameters
+        vgs_min: Starting gate voltage
+        vgs_max: Ending gate voltage
+        vds: Fixed drain voltage
+        n_frames: Number of animation frames
+        mesh_resolution: (nx, ny, nz) mesh points
+
+    Returns:
+        Dual-panel animated Plotly figure
+    """
+    from .mesh import create_device_mesh
+    from .concentration import generate_concentration_sweep
+
+    mesh = create_device_mesh(params, *mesh_resolution)
+    vgs_values = np.linspace(vgs_min, vgs_max, n_frames)
+    concentrations = generate_concentration_sweep(mesh, vgs_values, vds)
+
+    vth = threshold_voltage(params)
+    y_idx = len(mesh.y) // 2
+
+    # Create subplot figure
+    fig = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=('Electron Concentration', 'Current Flow'),
+        horizontal_spacing=0.12,
+    )
+
+    # Process first frame
+    conc = concentrations[0]
+    electrons_slice = np.maximum(conc.electrons[:, y_idx, :], 1e1)
+    log_values = smooth_concentration_field(np.log10(electrons_slice), sigma=0.8)
+
+    # Compute z ranges
+    all_log = []
+    for c in concentrations:
+        e = np.maximum(c.electrons[:, y_idx, :], 1e1)
+        all_log.append(smooth_concentration_field(np.log10(e), sigma=0.8))
+    zmin = min(v.min() for v in all_log)
+    zmax = max(v.max() for v in all_log)
+
+    # Upscaled coordinates
+    x_up = np.linspace(mesh.x[0], mesh.x[-1], log_values.shape[0])
+    z_up = np.linspace(mesh.z[0], mesh.z[-1], log_values.shape[1])
+
+    # Add concentration heatmap
+    fig.add_trace(
+        go.Heatmap(
+            x=x_up, y=z_up, z=log_values.T,
+            colorscale='Viridis', zmin=zmin, zmax=zmax,
+            colorbar=dict(title='log₁₀(n)', x=0.45, len=0.8),
+        ),
+        row=1, col=1
+    )
+
+    # Compute current field (with magnitude as heatmap)
+    X, Z, Jx, Jz = compute_current_flow_field(conc, vds, y_idx)
+    J_mag = np.sqrt(Jx**2 + Jz**2)
+
+    # Add current magnitude heatmap
+    fig.add_trace(
+        go.Heatmap(
+            x=mesh.x, y=mesh.z, z=J_mag.T,
+            colorscale='Hot', zmin=0, zmax=1,
+            colorbar=dict(title='|J|/|J|max', x=1.02, len=0.8),
+        ),
+        row=1, col=2
+    )
+
+    # Create frames
+    frames = []
+    for i, (values, param_val) in enumerate(zip(all_log, vgs_values)):
+        conc = concentrations[i]
+        X, Z, Jx, Jz = compute_current_flow_field(conc, vds, y_idx)
+        J_mag = np.sqrt(Jx**2 + Jz**2)
+
+        region = "CUTOFF" if param_val < vth else "INVERSION"
+
+        frame = go.Frame(
+            data=[
+                go.Heatmap(x=x_up, y=z_up, z=values.T, colorscale='Viridis', zmin=zmin, zmax=zmax),
+                go.Heatmap(x=mesh.x, y=mesh.z, z=J_mag.T, colorscale='Hot', zmin=0, zmax=1),
+            ],
+            name=f'{param_val:.2f}',
+            layout=go.Layout(
+                title=f'MOSFET Analysis | Vgs={param_val:.2f}V | {region}'
+            )
+        )
+        frames.append(frame)
+
+    fig.frames = frames
+
+    # Update layout
+    fig.update_layout(
+        title=f'MOSFET Analysis | Vgs={vgs_values[0]:.2f}V',
+        updatemenus=[
+            dict(
+                type='buttons', showactive=False,
+                y=-0.05, x=0.5, xanchor='center',
+                buttons=[
+                    dict(label='▶ Play', method='animate',
+                         args=[None, dict(frame=dict(duration=150, redraw=True),
+                                         transition=dict(duration=80))]),
+                    dict(label='⏸ Pause', method='animate',
+                         args=[[None], dict(frame=dict(duration=0, redraw=False))]),
+                ]
+            )
+        ],
+        sliders=[dict(
+            active=0, yanchor='top', xanchor='left',
+            currentvalue=dict(prefix='Vgs: ', suffix=' V', visible=True),
+            pad=dict(b=10, t=50), len=0.9, x=0.05, y=-0.02,
+            steps=[dict(args=[[f'{v:.2f}'], dict(frame=dict(duration=150, redraw=True))],
+                       label=f'{v:.1f}', method='animate') for v in vgs_values],
+        )],
+        height=400,
+    )
+
+    fig.update_xaxes(title_text='X (μm)', row=1, col=1)
+    fig.update_xaxes(title_text='X (μm)', row=1, col=2)
+    fig.update_yaxes(title_text='Z (μm)', scaleanchor='x', scaleratio=1, row=1, col=1)
+    fig.update_yaxes(title_text='Z (μm)', scaleanchor='x2', scaleratio=1, row=1, col=2)
+
+    return fig
 
 
 # =============================================================================

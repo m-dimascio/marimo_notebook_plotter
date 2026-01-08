@@ -45,6 +45,13 @@ from .visualization_3d import (
     create_animated_cross_section,
     create_vgs_sweep_animation_2d,
     create_vds_sweep_animation_2d,
+    # Fluid-dynamics style visualization
+    smooth_concentration_field,
+    compute_current_flow_field,
+    create_fluid_animation_2d,
+    create_vgs_sweep_fluid_animation,
+    create_vds_sweep_fluid_animation,
+    create_dual_view_animation,
     # COMSOL integration adapters
     comsol_to_carrier_concentration,
     create_comsol_animation_2d,
@@ -86,6 +93,10 @@ __all__ = [
     # 2D Animated Visualization
     "create_animated_cross_section", "create_vgs_sweep_animation_2d",
     "create_vds_sweep_animation_2d",
+    # Fluid-Dynamics Style Visualization
+    "smooth_concentration_field", "compute_current_flow_field",
+    "create_fluid_animation_2d", "create_vgs_sweep_fluid_animation",
+    "create_vds_sweep_fluid_animation", "create_dual_view_animation",
     # COMSOL Integration Adapters
     "comsol_to_carrier_concentration", "create_comsol_animation_2d",
     "create_comsol_vgs_animation", "create_comsol_vds_animation",
